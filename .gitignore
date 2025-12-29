@@ -1,0 +1,9 @@
+data/
+embedding_data/
+indices/
+results/
+test_results/
+__pycache__
+*pyc
+*cpython*
+debug*
