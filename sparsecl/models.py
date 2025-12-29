@@ -216,6 +216,20 @@ def cl_init(cls, config):
     cls.current_training_progress=0
     print(cls.hidden_size,cls.sqrt_hidden_size)
 
+    # ====== Query-side learnable transform T (only affects anchor/query z1) ======
+    cls.use_query_transform = getattr(cls.model_args, "use_query_transform", False)
+    if cls.use_query_transform:
+        cls.query_transform_dropout = nn.Dropout(getattr(cls.model_args, "query_transform_dropout", 0.1))
+        cls.query_transform_scale = float(getattr(cls.model_args, "query_transform_scale", 1.0))
+
+        cls.query_transform = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+
+        # Init for stability
+        init_std = float(getattr(cls.model_args, "query_transform_init_std", 0.02))
+        nn.init.normal_(cls.query_transform.weight, mean=0.0, std=init_std)
+    # ====== End query transform ======
+
+
 def our_cl_forward(cls,
     encoder,
     input_ids=None,
@@ -284,6 +298,15 @@ def our_cl_forward(cls,
 
     # Separate representation
     z1, z2 = pooler_output[:,0], pooler_output[:,1]
+
+    # ====== Apply learnable transform T on anchor/query only ======
+    if getattr(cls.model_args, "use_query_transform", False):
+        # Residual transform: T(z) = normalize(z + scale * Dropout(Wz))
+        scale = float(getattr(cls.model_args, "query_transform_scale", 1.0))
+        if hasattr(cls, "query_transform"):
+            z1 = z1 + scale * cls.query_transform_dropout(cls.query_transform(z1))
+            z1 = F.normalize(z1, p=2, dim=-1)
+    # ====== End transform ======
 
     # Hard negative
     if num_sent >2:

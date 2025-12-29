@@ -109,6 +109,26 @@ class ModelArguments:
             "help": "The **logit** of weight for hard negatives (only effective if hard negatives are used)."
         }
     )
+
+    # ====== ADD THIS INTO ModelArguments (train.py) ======
+    use_query_transform: bool = field(
+        default=False,
+        metadata={"help": "If True, apply a learnable transform T on anchor/query embeddings only: z1 <- T(z1)."}
+    )
+    query_transform_dropout: float = field(
+        default=0.1,
+        metadata={"help": "Dropout used inside query transform T."}
+    )
+    query_transform_scale: float = field(
+        default=1.0,
+        metadata={"help": "Scale for residual transform: T(z)=normalize(z + scale*Dropout(Wz))."}
+    )
+    query_transform_init_std: float = field(
+        default=0.02,
+        metadata={"help": "Init std for query_transform weights (normal distribution)."}
+    )
+    # ====== END ADD ======
+
     do_mlm: bool = field(
         default=False,
         metadata={

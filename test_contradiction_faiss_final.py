@@ -114,6 +114,17 @@ class ModelArguments:
             "help": "The **logit** of weight for hard negatives (only effective if hard negatives are used)."
         }
     )
+
+    use_query_transform: bool = field(
+        default=False,
+        metadata={"help": "If True, apply model's query_transform T on query embeddings ONLY during evaluation."}
+    )
+    query_transform_scale: float = field(
+        default=1.0,
+        metadata={"help": "Scale for residual transform: T(z)=normalize(z + scale*Wz) during eval."}
+    )
+
+
     do_mlm: bool = field(
         default=False,
         metadata={
@@ -272,8 +283,9 @@ def mean_pooling(model_output, attention_mask):
     return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
 
-def sentence_embedding(model_name,input_texts,model_path=None):
+def sentence_embedding(model_name,input_texts,model_path=None, is_query: bool = False):
     print(f"using model name: {model_name}")
+    print("[Eval] Applying query_transform to queries:", is_query, model_args[0].use_query_transform)
     if "our_gte" in model_name:
         use_cuda = torch.cuda.is_available()
         device = torch.device("cuda" if use_cuda else "cpu")
@@ -307,8 +319,18 @@ def sentence_embedding(model_name,input_texts,model_path=None):
                 batch_outputs = model(**batch_inputs,output_hidden_states=True, return_dict=True, sent_emb=True)
                 outputs.append(batch_outputs.pooler_output)
 
-        raw_embeddings = torch.cat(outputs).cpu()
+        raw_embeddings = torch.cat(outputs)
         # print(raw_embeddings.shape)
+        # ===== apply query-side transform T ONLY for queries =====
+        if is_query and model_args[0].use_query_transform:
+            # model is DataParallel, real module is model.module
+            m = model.module if hasattr(model, "module") else model
+            if hasattr(m, "query_transform") and m.query_transform is not None:
+                scale = float(getattr(model_args[0], "query_transform_scale", 1.0))
+                raw_embeddings = raw_embeddings + scale * m.query_transform(raw_embeddings)
+                raw_embeddings = F.normalize(raw_embeddings, p=2, dim=-1)
+        # ===== end transform =====
+        raw_embeddings = raw_embeddings.cpu()
     elif "our_bge" in model_name or "our_uae" in model_name:
         use_cuda = torch.cuda.is_available()
         device = torch.device("cuda" if use_cuda else "cpu")
@@ -342,7 +364,18 @@ def sentence_embedding(model_name,input_texts,model_path=None):
                 batch_outputs = model(**batch_inputs,output_hidden_states=True, return_dict=True, sent_emb=True)
                 outputs.append(batch_outputs.pooler_output)
 
-        raw_embeddings = torch.cat(outputs).cpu()
+        raw_embeddings = torch.cat(outputs)
+        # print(raw_embeddings.shape)
+        # ===== apply query-side transform T ONLY for queries =====
+        if is_query and model_args[0].use_query_transform:
+            # model is DataParallel, real module is model.module
+            m = model.module if hasattr(model, "module") else model
+            if hasattr(m, "query_transform") and m.query_transform is not None:
+                scale = float(getattr(model_args[0], "query_transform_scale", 1.0))
+                raw_embeddings = raw_embeddings + scale * m.query_transform(raw_embeddings)
+                raw_embeddings = F.normalize(raw_embeddings, p=2, dim=-1)
+        # ===== end transform =====
+        raw_embeddings = raw_embeddings.cpu()
         # print(raw_embeddings.shape)
     elif "gte" in model_name or "bge" in model_name:
         use_cuda = torch.cuda.is_available()
@@ -438,17 +471,17 @@ for qid, value in queries.items():
     query_map[qid]=len(query_texts)
     query_texts.append(passage)
 
-cos_input_embeddings=sentence_embedding(cos_model_name,input_texts,cos_model_path)
-cos_input_embeddings=cos_input_embeddings.to(torch.float32).numpy()
+cos_input_embeddings = sentence_embedding(cos_model_name, input_texts, cos_model_path, is_query=False)
+cos_input_embeddings = cos_input_embeddings.to(torch.float32).numpy()
 
-cos_query_embeddings=sentence_embedding(cos_model_name,query_texts,cos_model_path)
-cos_query_embeddings=cos_query_embeddings.to(torch.float32).numpy()
+cos_query_embeddings = sentence_embedding(cos_model_name, query_texts, cos_model_path, is_query=True)
+cos_query_embeddings = cos_query_embeddings.to(torch.float32).numpy()
 
 if "both" in sort_metric:
-    input_embeddings=sentence_embedding(model_name,input_texts,our_model_path)
+    input_embeddings=sentence_embedding(model_name,input_texts,our_model_path, is_query=False)
     input_embeddings=input_embeddings.to(torch.float32).numpy()
 
-    query_embeddings=sentence_embedding(model_name,query_texts,our_model_path)
+    query_embeddings=sentence_embedding(model_name,query_texts,our_model_path, is_query=True)
     query_embeddings=query_embeddings.to(torch.float32).numpy()
     sqrt_dim=math.sqrt(input_embeddings.shape[1])
 

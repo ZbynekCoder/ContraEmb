@@ -24,4 +24,9 @@ python train.py \
     --do_train \
     --do_eval \
     --fp16 \
-    "$@"
+    --hard_negative_weight 0.5 \
+    --use_query_transform True \
+    --query_transform_dropout 0.1 \
+    --query_transform_scale 1.0 \
+    --query_transform_init_std 0.02
+
