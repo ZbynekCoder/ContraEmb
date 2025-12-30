@@ -12,6 +12,8 @@ python test_contradiction_faiss_final.py \
     --pooler_type avg \
     --metric both_sum \
     --max_seq_length 512 \
+    --use_query_transform True --query_transform_scale 1.0
+
 
 # method: Zeroshot (cosine) + SparseCL (hoyer)
 

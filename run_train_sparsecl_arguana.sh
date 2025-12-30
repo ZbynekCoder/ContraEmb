@@ -1,6 +1,6 @@
 # BGE finetuning on Arguana dataset using SparseCL
 
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=2
 
 python train.py \
     --model_name our_bge \

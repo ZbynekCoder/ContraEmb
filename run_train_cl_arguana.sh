@@ -1,6 +1,6 @@
 # BGE finetuning on Arguana dataset
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=2
 
 python train.py \
     --model_name our_bge \
@@ -13,7 +13,7 @@ python train.py \
     --per_device_train_batch_size 64 \
     --per_device_eval_batch_size 64 \
     --gradient_accumulation_steps 1 \
-    --learning_rate 2e-5 \
+    --learning_rate 5e-5 \
     --max_seq_length 512 \
     --pad_to_max_length True \
     --pooler_type avg \
@@ -26,7 +26,7 @@ python train.py \
     --fp16 \
     --hard_negative_weight 0.5 \
     --use_query_transform True \
+    --freeze_backbone True \
     --query_transform_dropout 0.1 \
     --query_transform_scale 1.0 \
     --query_transform_init_std 0.02
-

@@ -127,6 +127,10 @@ class ModelArguments:
         default=0.02,
         metadata={"help": "Init std for query_transform weights (normal distribution)."}
     )
+    freeze_backbone: bool = field(
+        default=False,
+        metadata={"help": "If True, freeze the encoder backbone and only train query-side modules (e.g., query_transform)."}
+    )
     # ====== END ADD ======
 
     do_mlm: bool = field(
@@ -429,6 +433,28 @@ def main():
         model = AutoModelForMaskedLM.from_config(config)
 
     model.resize_token_embeddings(len(tokenizer))
+    # ================== FREEZE BACKBONE ==================
+    if model_args.freeze_backbone:
+        print(">>> Freezing backbone encoder parameters")
+
+        for name, param in model.named_parameters():
+            # 默认全部冻结
+            param.requires_grad = False
+
+            # 只放开 query-side transform（你的 T）
+            if "query_transform" in name:
+                param.requires_grad = True
+
+            # 如果你想让 pooler 也一起训（可选）
+            if "pooler" in name:
+                param.requires_grad = True
+
+    # sanity check：打印可训练参数
+    trainable = [n for n, p in model.named_parameters() if p.requires_grad]
+    print(">>> Trainable parameters:")
+    for n in trainable:
+        print("   ", n)
+    # ================== END FREEZE ==================
 
     # Prepare features
     column_names = datasets["train"].column_names

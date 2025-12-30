@@ -472,17 +472,17 @@ for qid, value in queries.items():
     query_texts.append(passage)
 
 cos_input_embeddings = sentence_embedding(cos_model_name, input_texts, cos_model_path, is_query=False)
-cos_input_embeddings = cos_input_embeddings.to(torch.float32).numpy()
+cos_input_embeddings = cos_input_embeddings.to(torch.float32).detach().numpy()
 
 cos_query_embeddings = sentence_embedding(cos_model_name, query_texts, cos_model_path, is_query=True)
-cos_query_embeddings = cos_query_embeddings.to(torch.float32).numpy()
+cos_query_embeddings = cos_query_embeddings.to(torch.float32).detach().numpy()
 
 if "both" in sort_metric:
     input_embeddings=sentence_embedding(model_name,input_texts,our_model_path, is_query=False)
-    input_embeddings=input_embeddings.to(torch.float32).numpy()
+    input_embeddings=input_embeddings.to(torch.float32).detach().numpy()
 
     query_embeddings=sentence_embedding(model_name,query_texts,our_model_path, is_query=True)
-    query_embeddings=query_embeddings.to(torch.float32).numpy()
+    query_embeddings=query_embeddings.to(torch.float32).detach().numpy()
     sqrt_dim=math.sqrt(input_embeddings.shape[1])
 
 if not os.path.exists("./indices"):
