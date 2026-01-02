@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=5
 
 LR=5e-5
-EP=5
+EP=3
 FB=True
-HNW=0.0
+HNW=0.5
 TEMP=0.02
 QTD=0.1
 QTS=1.0
 QTIS=0.02
 
 TS=$(date +"%Y%m%d-%H%M%S")
-OUT_DIR=results/arguana/queryT_linear/lr${LR}_ep${EP}_fb${FB}_hnw${HNW}_temp${TEMP}/${TS}
+OUT_DIR=results/hotpotqa/queryT_linear/lr${LR}_ep${EP}_fb${FB}_hnw${HNW}_temp${TEMP}/${TS}
 
 mkdir -p ${OUT_DIR}
 cp "$0" "${OUT_DIR}/run_train.sh"
 cat <<EOF > ${OUT_DIR}/config.txt
-Task: ArguAna contradiction retrieval
+Task: HotpotQA contradiction retrieval
 Date: $(date)
 
 LR=${LR}
@@ -34,14 +34,14 @@ QueryTransform:
 EOF
 
 python train.py \
-  --model_name our_bge \
-  --model_name_or_path BAAI/bge-base-en-v1.5 \
-  --train_file data/arguana_training_final.csv \
-  --eval_file data/arguana_validation_final.csv \
+  --model_name our_gte \
+  --model_name_or_path Alibaba-NLP/gte-large-en-v1.5 \
+  --train_file data/hotpotqa_train_gpt4_final.csv \
+  --eval_file data/hotpotqa_dev_gpt4_final.csv \
   --output_dir ${OUT_DIR}/model \
   --do_train \
   --do_eval \
-  --max_seq_length 512 \
+  --max_seq_length 256 \
   --pad_to_max_length True \
   --pooler_type avg \
   --loss_type cos \

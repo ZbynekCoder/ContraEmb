@@ -1,671 +1,364 @@
+# test_contradiction_faiss_final.py
 import os
-
 os.environ["TOKENIZERS_PARALLELISM"] = "True"
 
-import torch.nn.functional as F
-
-from torch import Tensor
-
-from transformers import (
-    CONFIG_MAPPING,
-    MODEL_FOR_MASKED_LM_MAPPING,
-    AutoConfig,
-    AutoModel,
-    AutoTokenizer,
-    HfArgumentParser,
-)
-
-import random
-from datetime import datetime
-
-import torch
-import numpy as np
-
+import logging
+import pickle
 from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Optional, Dict, List, Tuple
 
-from typing import Optional, List, Dict
+import faiss
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import AutoConfig, AutoModel, AutoTokenizer, HfArgumentParser
 
-from sparsecl.models import our_BertForCL
-from sparsecl.gte.modeling import NewModelForCL
-from multiprocessing import Pool
-
-MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
-MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
-
-
-from beir import LoggingHandler
-from beir.retrieval import models
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.dense import DenseRetrievalExactSearch as DRES
+from beir.retrieval import models
 
-import logging
-import os
-import pickle
-from tqdm import tqdm
-import math
-import copy
-import faiss
-from torch.utils.data import DataLoader
+# These are needed to load your trained checkpoint (our_BertForCL / our_gte)
+from sparsecl.models import our_BertForCL
+try:
+    from sparsecl.gte.modeling import NewModelForCL
+except Exception:
+    NewModelForCL = None
 
-# Get current time
-current_time = datetime.now().time()
-formatted_time = current_time.strftime('%H:%M:%S')
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 @dataclass
 class ModelArguments:
-    """
-    Arguments pertaining to which model/config/tokenizer we are going to fine-tune, or train from scratch.
-    """
-
-    # Huggingface's original arguments
+    # ===== model selection =====
     model_name_or_path: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "The model checkpoint for weights initialization."
-            "Don't set if you want to train a model from scratch."
-        },
+        metadata={"help": "Path to a fine-tuned checkpoint directory."}
     )
-    model_type: Optional[str] = field(
-        default=None,
-        metadata={"help": "If training from scratch, pass a model type from the list: " + ", ".join(MODEL_TYPES)},
-    )
-    config_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
-    )
-    tokenizer_name: Optional[str] = field(
-        default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
-    )
-    cache_dir: Optional[str] = field(
-        default=None,
-        metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
-    )
-    use_fast_tokenizer: bool = field(
-        default=True,
-        metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
-    )
-    model_revision: str = field(
-        default="main",
-        metadata={"help": "The specific model version to use (can be a branch name, tag name or commit id)."},
-    )
-    use_auth_token: bool = field(
-        default=False,
-        metadata={
-            "help": "Will use the token generated when running `transformers-cli login` (necessary to use this script "
-            "with private models)."
-        },
-    )
-
-    temp: float = field(
-        default=0.05,
-        metadata={
-            "help": "Temperature for softmax."
-        }
-    )
-    pooler_type: str = field(
-        default="cls",
-        metadata={
-            "help": "What kind of pooler to use (cls, cls_before_pooler, avg, avg_top2, avg_first_last)."
-        }
-    )
-    hard_negative_weight: float = field(
-        default=0,
-        metadata={
-            "help": "The **logit** of weight for hard negatives (only effective if hard negatives are used)."
-        }
-    )
-
-    use_query_transform: bool = field(
-        default=False,
-        metadata={"help": "If True, apply model's query_transform T on query embeddings ONLY during evaluation."}
-    )
-    query_transform_scale: float = field(
-        default=1.0,
-        metadata={"help": "Scale for residual transform: T(z)=normalize(z + scale*Wz) during eval."}
-    )
-
-
-    do_mlm: bool = field(
-        default=False,
-        metadata={
-            "help": "Whether to use MLM auxiliary objective."
-        }
-    )
-    mlm_weight: float = field(
-        default=0.1,
-        metadata={
-            "help": "Weight for MLM auxiliary objective (only effective if --do_mlm)."
-        }
-    )
-    mlp_only_train: bool = field(
-        default=False,
-        metadata={
-            "help": "Use MLP only during training"
-        }
-    )
-    write_path: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "where to write test result"
-        },
-    )
+    # legacy alias
     cos_model_name_or_path: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "The model checkpoint for weights initialization."
-            "Don't set if you want to train a model from scratch."
-        },
+        metadata={"help": "Deprecated alias of model_name_or_path. If set, it will be used."}
     )
-    cos_model_name: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "which type of model you are using"
-        },
-    )
-    model_name: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "which type of model you are using"
-        },
-    )
-    algo_type: Optional[str] = field(
-        default="None",
-        metadata={
-            "help": "which type of model you are using"
-        },
-    )
-    metric: Optional[str] = field(
-        default="cos",
-        metadata={
-            "help": "which metric are you using"
-        },
-    )
-    max_seq_length: Optional[int] = field(
-        default=512,
-        metadata={
-            "help": "how many times of reference data used"
-        },
-    )
-    alpha: float = field(
-        default=None,
-        metadata={
-            "help": "parameter for sparsity metric"
-        }
-    )
-    dataset_name: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "which dataset are you using"
-        },
-    )
-    split: Optional[str] = field(
-        default="test",
-        metadata={
-            "help": "which split are you using"
-        },
+    # zero-shot fallback
+    model_name: str = field(
+        default="bge",
+        metadata={"help": "Base model shortcut if model_name_or_path is not provided: bge|gte|uae."}
     )
 
+    # ===== embedding settings =====
+    pooler_type: str = field(default="avg")
+    max_seq_length: int = field(default=512)
+    batch_size: int = field(default=64)
+    use_data_parallel: bool = field(default=False)
+
+    # ===== query-side transform =====
+    use_query_transform: bool = field(default=False)
+    query_transform_scale: float = field(default=1.0)
+
+    # ===== compatibility fields (IMPORTANT) =====
+    # your our_BertForCL __init__ reads these from model_args
+    do_mlm: bool = field(default=False)
+    mlm_weight: float = field(default=0.1)
+    mlp_only_train: bool = field(default=False)
+
+    # some checkpoints/configs expect these to exist
+    temp: float = field(default=0.02)
+    hard_negative_weight: float = field(default=0.0)
+    loss_type: str = field(default="cos")
 
 
-#### Just some code to print debug information to stdout
-logging.basicConfig(format='%(asctime)s - %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S',
-                    level=logging.INFO,
-                    handlers=[LoggingHandler()])
-#### /print debug information to stdout
-
-parser = HfArgumentParser(ModelArguments)
-model_args = parser.parse_args_into_dataclasses()
-
-dataset_name=model_args[0].dataset_name
-
-if model_args[0].split is None:
-    split = "test"
-else:
-    split=model_args[0].split
-
-def average_pool(last_hidden_states: Tensor,
-                 attention_mask: Tensor) -> Tensor:
-    last_hidden = last_hidden_states.masked_fill(~attention_mask[..., None].bool(), 0.0)
-    return last_hidden.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
-
-# either model name or model path is specified
-model_name=model_args[0].model_name
-cos_model_name=model_args[0].cos_model_name
-
-our_model_path=model_args[0].model_name_or_path
-cos_model_path=model_args[0].cos_model_name_or_path
-
-if our_model_path is not None:
-    if "bge" in our_model_path.lower():
-        model_name="our_bge"
-    elif "uae" in our_model_path.lower():
-        model_name="our_uae"
-    elif "gte" in our_model_path.lower():
-        model_name="our_gte"
-    config = AutoConfig.from_pretrained(our_model_path,trust_remote_code=True,)
-if cos_model_path is not None:
-    if "bge" in cos_model_path.lower():
-        cos_model_name="our_bge"
-    elif "uae" in cos_model_path.lower():
-        cos_model_name="our_uae"
-    elif "gte" in cos_model_path.lower():
-        cos_model_name="our_gte"
-    config = AutoConfig.from_pretrained(cos_model_path,trust_remote_code=True,)
-write_path=model_args[0].write_path
-
-algo_type=model_args[0].algo_type
-max_seq_length=model_args[0].max_seq_length
-alpha=model_args[0].alpha
-sort_metric=model_args[0].metric
-
-print("max_seq_length=", max_seq_length)
-
-print(model_name)
-print(our_model_path)
-print(cos_model_name)
-print(cos_model_path)
-
-random.seed(211)
-
-folder_path = write_path
-
-# Check if the folder already exists
-if not os.path.exists(folder_path):
-    # Create the folder
-    os.makedirs(folder_path)
-
-output_file=open(os.path.join(write_path,f"{dataset_name}_parallel_output"),"w")
-
-def mean_pooling(model_output, attention_mask):
-    token_embeddings = model_output.last_hidden_state #First element of model_output contains all token embeddings
-    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-    return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+@dataclass
+class EvalArguments:
+    dataset_name: str = field(default="arguana")
+    split: str = field(default="dev", metadata={"help": "dev | test"})
+    write_path: str = field(default="test_results/cos_only")
+    k_neighbors: int = field(default=1000)
+    index_dir: str = field(default="./indices")
+    overwrite_index: bool = field(default=False)
 
 
-def sentence_embedding(model_name,input_texts,model_path=None, is_query: bool = False):
-    print(f"using model name: {model_name}")
-    print("[Eval] Applying query_transform to queries:", is_query, model_args[0].use_query_transform)
-    if "our_gte" in model_name:
-        use_cuda = torch.cuda.is_available()
-        device = torch.device("cuda" if use_cuda else "cpu")
+def _ensure_model_args_compat(model_args: ModelArguments) -> None:
+    """Make eval robust even if dataclass changes."""
+    defaults = {
+        "do_mlm": False,
+        "mlm_weight": 0.1,
+        "mlp_only_train": False,
+        "temp": 0.02,
+        "hard_negative_weight": 0.0,
+        "loss_type": "cos",
+    }
+    for k, v in defaults.items():
+        if not hasattr(model_args, k):
+            setattr(model_args, k, v)
 
-        print("model path", model_path)
 
-        tokenizer = AutoTokenizer.from_pretrained(model_path,trust_remote_code=True)
+def _select_model_path(args: ModelArguments) -> Optional[str]:
+    if args.cos_model_name_or_path:
+        if args.model_name_or_path and args.model_name_or_path != args.cos_model_name_or_path:
+            logger.warning(
+                "Both model_name_or_path and cos_model_name_or_path are set; "
+                "using cos_model_name_or_path."
+            )
+        return args.cos_model_name_or_path
+    return args.model_name_or_path
 
-        model = NewModelForCL.from_pretrained(
+
+def _device() -> torch.device:
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _load_retrieval_pickles(dataset_name: str, split: str) -> Tuple[Dict, Dict, Dict]:
+    """
+    Expected pickle format (same convention as your original script):
+      - corpus pkls: pickle.load(f) -> corpus dict
+      - split pkl: three objects: (ignored), queries, qrels
+    """
+    corpus: Dict = {}
+    for corpus_split in ["train", "dev", "test"]:
+        if "arguana" in dataset_name:
+            read_path = f"./data/arguana_{corpus_split}_retrieval_final.pkl"
+        else:
+            gen_model_name = "gpt4"
+            read_path = f"./data/{dataset_name}_{corpus_split}_retrieval_{gen_model_name}_final.pkl"
+
+        with open(read_path, "rb") as f:
+            split_corpus = pickle.load(f)
+        corpus = {**corpus, **split_corpus}
+
+    if "arguana" in dataset_name:
+        read_path = f"./data/arguana_{split}_retrieval_final.pkl"
+    else:
+        gen_model_name = "gpt4"
+        read_path = f"./data/{dataset_name}_{split}_retrieval_{gen_model_name}_final.pkl"
+
+    with open(read_path, "rb") as f:
+        _ = pickle.load(f)      # ignore
+        queries = pickle.load(f)
+        qrels = pickle.load(f)
+
+    return corpus, queries, qrels
+
+
+def _load_encoder(args: ModelArguments):
+    """
+    Loads either:
+      - fine-tuned checkpoint (our_BertForCL / NewModelForCL) if model_name_or_path is set
+      - else a base AutoModel (bge/gte/uae)
+    """
+    _ensure_model_args_compat(args)
+
+    device = _device()
+    model_path = _select_model_path(args)
+
+    if model_path:
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+
+        # Heuristic: if it's a GTE-style checkpoint and NewModelForCL exists
+        lower = model_path.lower()
+        if (("gte" in lower) or ("our_gte" in lower)) and (NewModelForCL is not None):
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            model = NewModelForCL.from_pretrained(
                 model_path,
-                model_args=model_args[0],
+                model_args=args,
                 config=config,
                 add_pooling_layer=True,
                 trust_remote_code=True,
             )
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            model = our_BertForCL.from_pretrained(
+                model_path,
+                from_tf=bool(".ckpt" in model_path),
+                config=config,
+                model_args=args,
+            )
 
-        model=model.to(device)
-        model = torch.nn.DataParallel(model)
-        batch_size=64
+        model = model.to(device)
+        if args.use_data_parallel and torch.cuda.device_count() > 1:
+            model = torch.nn.DataParallel(model)
+        return model, tokenizer
 
-        # Create DataLoader for batching
-        data_loader = DataLoader(input_texts, batch_size=batch_size)
-
-        # Perform inference batch by batch
-        outputs = []
-        model.eval()
-        with torch.no_grad():
-            for batch_texts in tqdm(data_loader):
-                batch_inputs = tokenizer(batch_texts, max_length=max_seq_length, padding=True, truncation=True, return_tensors='pt')
-                batch_inputs = {key: value.to(device) for key, value in batch_inputs.items()}
-                batch_outputs = model(**batch_inputs,output_hidden_states=True, return_dict=True, sent_emb=True)
-                outputs.append(batch_outputs.pooler_output)
-
-        raw_embeddings = torch.cat(outputs)
-        # print(raw_embeddings.shape)
-        # ===== apply query-side transform T ONLY for queries =====
-        if is_query and model_args[0].use_query_transform:
-            # model is DataParallel, real module is model.module
-            m = model.module if hasattr(model, "module") else model
-            if hasattr(m, "query_transform") and m.query_transform is not None:
-                scale = float(getattr(model_args[0], "query_transform_scale", 1.0))
-                raw_embeddings = raw_embeddings + scale * m.query_transform(raw_embeddings)
-                raw_embeddings = F.normalize(raw_embeddings, p=2, dim=-1)
-        # ===== end transform =====
-        raw_embeddings = raw_embeddings.cpu()
-    elif "our_bge" in model_name or "our_uae" in model_name:
-        use_cuda = torch.cuda.is_available()
-        device = torch.device("cuda" if use_cuda else "cpu")
-
-        print("model path", model_path)
-
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-        model = our_BertForCL.from_pretrained(
-                    model_path,
-                    from_tf=False,
-                    config=config,
-                    use_auth_token=None,
-                    model_args=model_args[0]
-                )
-
-        model=model.to(device)
-        model = torch.nn.DataParallel(model)
-        batch_size=64
-
-        # Create DataLoader for batching
-        data_loader = DataLoader(input_texts, batch_size=batch_size)
-
-        # Perform inference batch by batch
-        outputs = []
-        model.eval()
-        with torch.no_grad():
-            for batch_texts in tqdm(data_loader):
-                batch_inputs = tokenizer(batch_texts, max_length=max_seq_length, padding=True, truncation=True, return_tensors='pt')
-                batch_inputs = {key: value.to(device) for key, value in batch_inputs.items()}
-                batch_outputs = model(**batch_inputs,output_hidden_states=True, return_dict=True, sent_emb=True)
-                outputs.append(batch_outputs.pooler_output)
-
-        raw_embeddings = torch.cat(outputs)
-        # print(raw_embeddings.shape)
-        # ===== apply query-side transform T ONLY for queries =====
-        if is_query and model_args[0].use_query_transform:
-            # model is DataParallel, real module is model.module
-            m = model.module if hasattr(model, "module") else model
-            if hasattr(m, "query_transform") and m.query_transform is not None:
-                scale = float(getattr(model_args[0], "query_transform_scale", 1.0))
-                raw_embeddings = raw_embeddings + scale * m.query_transform(raw_embeddings)
-                raw_embeddings = F.normalize(raw_embeddings, p=2, dim=-1)
-        # ===== end transform =====
-        raw_embeddings = raw_embeddings.cpu()
-        # print(raw_embeddings.shape)
-    elif "gte" in model_name or "bge" in model_name:
-        use_cuda = torch.cuda.is_available()
-        device = torch.device("cuda" if use_cuda else "cpu")
-        if "bge" in model_name:
-            dim=768
-            tokenizer = AutoTokenizer.from_pretrained('BAAI/bge-base-en-v1.5')
-            model = AutoModel.from_pretrained('BAAI/bge-base-en-v1.5')
-        elif "gte" in model_name:
-            dim=1024
-            tokenizer = AutoTokenizer.from_pretrained('Alibaba-NLP/gte-large-en-v1.5', trust_remote_code=True)
-            model = AutoModel.from_pretrained('Alibaba-NLP/gte-large-en-v1.5',trust_remote_code=True)
-
-        model=model.to(device)
-        model = torch.nn.DataParallel(model)
-        model.eval()
-        batch_size=64
-
-        data_loader = DataLoader(input_texts, batch_size=batch_size)
-        # Perform inference batch by batch
-        outputs = []
-        with torch.no_grad():
-            for batch_texts in tqdm(data_loader):
-                batch_inputs = tokenizer(batch_texts, max_length=max_seq_length, padding=True, truncation=True, return_tensors='pt')
-                batch_inputs = {key: value.to(device) for key, value in batch_inputs.items()}
-                batch_outputs = model(**batch_inputs,output_hidden_states=True, return_dict=True)
-
-                if "gte" in model_name:
-                    mini_embeddings = batch_outputs.last_hidden_state[:, 0]
-                elif "bge" in model_name:
-                    mini_embeddings=batch_outputs[0][:, 0]
-
-                mini_embeddings = torch.nn.functional.normalize(mini_embeddings, p=2, dim=1)
-                outputs.append(mini_embeddings)
-
-        raw_embeddings = torch.cat(outputs).cpu()
-    elif model_name=="uae":
-        from angle_emb import AnglE
-
-        angle = AnglE.from_pretrained('WhereIsAI/UAE-Large-V1', pooling_strategy='cls').cuda()
-        batch_size=64
-        raw_embeddings=torch.zeros(len(input_texts), 1024)
-        with torch.no_grad():
-            for i in tqdm(range(0,len(input_texts),batch_size)):
-                mini_embeddings = angle.encode(input_texts[i:min(i+batch_size,len(input_texts))])
-                raw_embeddings[i:min(i+batch_size,len(input_texts))]=torch.from_numpy(mini_embeddings)
-
-    # normalize
-    raw_embeddings=raw_embeddings/torch.norm(raw_embeddings, dim=1, keepdim=True)
-    raw_embeddings=raw_embeddings.cpu()
-
-    return raw_embeddings
-
-sim_qrels=None
-gen_model_name="gpt4"
-
-print(dataset_name, split)
-corpus={}
-for corpus_split in ["train","dev","test"]:
-    if "arguana" in dataset_name:
-        read_path=f"./data/arguana_{corpus_split}_retrieval_final.pkl"
+    # Zero-shot fallback
+    if args.model_name.lower() == "bge":
+        name = "BAAI/bge-base-en-v1.5"
+        tokenizer = AutoTokenizer.from_pretrained(name)
+        model = AutoModel.from_pretrained(name)
+    elif args.model_name.lower() == "gte":
+        name = "Alibaba-NLP/gte-large-en-v1.5"
+        tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
+        model = AutoModel.from_pretrained(name, trust_remote_code=True)
+    elif args.model_name.lower() == "uae":
+        name = "WhereIsAI/UAE-Large-V1"
+        tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
+        model = AutoModel.from_pretrained(name, trust_remote_code=True)
     else:
-        read_path=f"./data/{dataset_name}_{corpus_split}_retrieval_{gen_model_name}_final.pkl"
-    with open(read_path,"rb") as f:
-        split_corpus=pickle.load(f)
-    corpus={**corpus,**split_corpus}
-if "arguana" in dataset_name:
-    read_path=f"./data/arguana_{split}_retrieval_final.pkl"
-else:
-    read_path=f"./data/{dataset_name}_{split}_retrieval_{gen_model_name}_final.pkl"
-with open(read_path,"rb") as f:
-    _=pickle.load(f)
-    queries=pickle.load(f)
-    qrels=pickle.load(f)
+        raise ValueError(f"Unknown model_name={args.model_name}. Use bge|gte|uae or set --model_name_or_path.")
 
-no_title=True
-
-input_texts=[]
-passage_id=[]
-passage_name={}
-
-for pid, value in corpus.items():
-
-    passage=value.get("text", "").strip()
-    passage_id.append(pid)
-    passage_name[pid]=len(input_texts)
-    input_texts.append(passage)
-
-query_texts=[]
-query_map={}
-for qid, value in queries.items():
-    passage=value.strip()
-    query_map[qid]=len(query_texts)
-    query_texts.append(passage)
-
-cos_input_embeddings = sentence_embedding(cos_model_name, input_texts, cos_model_path, is_query=False)
-cos_input_embeddings = cos_input_embeddings.to(torch.float32).detach().numpy()
-
-cos_query_embeddings = sentence_embedding(cos_model_name, query_texts, cos_model_path, is_query=True)
-cos_query_embeddings = cos_query_embeddings.to(torch.float32).detach().numpy()
-
-if "both" in sort_metric:
-    input_embeddings=sentence_embedding(model_name,input_texts,our_model_path, is_query=False)
-    input_embeddings=input_embeddings.to(torch.float32).detach().numpy()
-
-    query_embeddings=sentence_embedding(model_name,query_texts,our_model_path, is_query=True)
-    query_embeddings=query_embeddings.to(torch.float32).detach().numpy()
-    sqrt_dim=math.sqrt(input_embeddings.shape[1])
-
-if not os.path.exists("./indices"):
-    os.makedirs("./indices")
-
-# build KNN index for embeddings
-if cos_model_path is not None:
-    folders=os.path.normpath(cos_model_path).split("/")
-    index_name=os.path.join("./indices",dataset_name+"-"+folders[-1]+".faiss")
-else:
-    index_name=os.path.join("./indices",dataset_name+"-"+cos_model_name+".faiss")
-
-print("index name", index_name)
-
-if os.path.exists(index_name):
-    index = faiss.read_index(index_name)
-    print("index load")
-else:
-    dim=cos_input_embeddings.shape[1]
-    index = faiss.IndexHNSWFlat(dim,64)
-    index.add(cos_input_embeddings)
-    faiss.write_index(index, index_name)
-    print("index completes")
-
-# first search for the top 1000 passages based on cosine similarity, and then rerank them by combining cosine and sparsity
-index.hnsw.efSearch = 1000
-k_neighbors=1000
-D,ids=index.search(cos_query_embeddings,k=k_neighbors)
-
-print("search completes!")
-
-model = DRES(models.SentenceBERT("BAAI/bge-base-en-v1.5"), batch_size=16)
-retriever = EvaluateRetrieval(model, score_function="cos_sim") # or "cos_sim" for cosine similarity
+    model = model.to(device)
+    if args.use_data_parallel and torch.cuda.device_count() > 1:
+        model = torch.nn.DataParallel(model)
+    return model, tokenizer
 
 
-def dist(A,B,metric="hoyer"):
-    if metric=="hoyer":
-        diff=A-B
-        diff_l1=np.linalg.norm(diff,ord=1)
-        diff_l2=np.linalg.norm(diff,ord=2)
-        if diff_l2<1e-3:
-            return -1e9
-        hoyer=(sqrt_dim-diff_l1/diff_l2)/(sqrt_dim-1)
-        return hoyer
-    elif metric=="cos":
-        dot_product = np.dot(A, B)
-        norm_a = np.linalg.norm(A)
-        norm_b = np.linalg.norm(B)
-        cosine_similarity = dot_product / (norm_a * norm_b)
-        return cosine_similarity
+@torch.no_grad()
+def _encode_texts(
+    args: ModelArguments,
+    texts: List[str],
+    is_query: bool,
+    model,
+    tokenizer,
+) -> torch.Tensor:
+    """
+    Returns L2-normalized embeddings on CPU float32: (N, dim).
+    """
+    device = _device()
+    dl = DataLoader(texts, batch_size=int(args.batch_size), shuffle=False)
+
+    model.eval()
+    outs: List[torch.Tensor] = []
+
+    for batch_texts in tqdm(dl, desc=("EncodeQ" if is_query else "EncodeD")):
+        batch_inputs = tokenizer(
+            batch_texts,
+            max_length=int(args.max_seq_length),
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        )
+        batch_inputs = {k: v.to(device) for k, v in batch_inputs.items()}
+
+        base = model.module if hasattr(model, "module") else model
+
+        # our_* checkpoints: use sent_emb=True to get pooler_output
+        if isinstance(base, our_BertForCL) or (NewModelForCL is not None and isinstance(base, NewModelForCL)) or hasattr(base, "sentemb_forward"):
+            outputs = model(**batch_inputs, output_hidden_states=True, return_dict=True, sent_emb=True)
+            z = outputs.pooler_output
+        else:
+            # base models: mean pooling
+            outputs = model(**batch_inputs, return_dict=True)
+            last_hidden = outputs.last_hidden_state  # (bs, L, H)
+            attn = batch_inputs["attention_mask"].unsqueeze(-1)
+            z = (last_hidden * attn).sum(dim=1) / attn.sum(dim=1).clamp_min(1e-9)
+
+        # Query-side transform ONLY on queries
+        if is_query and args.use_query_transform:
+            if hasattr(base, "query_transform") and base.query_transform is not None:
+                scale = float(args.query_transform_scale)
+                z = z + scale * base.query_transform(z)
+
+        z = F.normalize(z, p=2, dim=-1)
+        outs.append(z.cpu())
+
+    return torch.cat(outs, dim=0).to(torch.float32)
 
 
-def process_query(query_name):
+def _build_or_load_index(
+    doc_np: np.ndarray,
+    dim: int,
+    index_file: str,
+    overwrite: bool = False,
+) -> faiss.Index:
+    """
+    Use HNSW inner product index (cosine for normalized vectors).
+    """
+    if (not overwrite) and os.path.exists(index_file):
+        index = faiss.read_index(index_file)
+        logger.info("Loaded FAISS index: %s", index_file)
+        return index
 
-    results={}
-    cos_results={}
-    qid=query_map[query_name]
-    # print(qid,query_texts[qid])
-    score=[]
-    if sort_metric=="cos":
-        score=[]
-        for i in range(k_neighbors):
-            pid=ids[qid][i]
-            passage_name=passage_id[pid]
-            score.append((dist(cos_input_embeddings[pid],cos_query_embeddings[qid],"cos"),passage_name))
-        cos_results[query_name]={}
-        for i in range(10):
-            cos_results[query_name][score[i][1]]=float(score[i][0])
-    elif "both_sum" in sort_metric:
-        score=[]
-        for i in range(k_neighbors):
-            pid=ids[qid][i]
-            passage_name=passage_id[pid]
-            score.append((dist(cos_input_embeddings[pid],cos_query_embeddings[qid],"cos"),passage_name,dist(input_embeddings[pid],query_embeddings[qid],second_metric)))
-
-        cos_results[query_name]={}
-        for i in range(10):
-            cos_results[query_name][score[i][1]]=float(score[i][0])
-
-        score=sorted(score,key=lambda x: float(x[0]+alpha*x[2]),reverse=True)
-        results[query_name]={}
-        for i in range(10):
-            results[query_name][score[i][1]]=float(score[i][0]+alpha*score[i][2])
-    return (results,cos_results)
+    index = faiss.IndexHNSWFlat(dim, 64, faiss.METRIC_INNER_PRODUCT)
+    index.hnsw.efConstruction = 200
+    index.add(doc_np)
+    faiss.write_index(index, index_file)
+    logger.info("Built & saved FAISS index: %s", index_file)
+    return index
 
 
-def retrieval_test():
+def main():
+    parser = HfArgumentParser((ModelArguments, EvalArguments))
+    model_args, eval_args = parser.parse_args_into_dataclasses()
 
-    query_args=[]
-    for query_name in qrels:
-        query_args.append(query_name)
+    # output files
+    os.makedirs(eval_args.write_path, exist_ok=True)
+    out_path = os.path.join(eval_args.write_path, f"{eval_args.dataset_name}_{eval_args.split}_cos_only.txt")
+    with open(out_path, "w", encoding="utf-8") as out_f:
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] dataset={eval_args.dataset_name} split={eval_args.split}", file=out_f)
+        logger.info("dataset=%s split=%s", eval_args.dataset_name, eval_args.split)
 
-    with Pool() as pool:
-        pool_results = pool.map(process_query, query_args)
+        corpus, queries, qrels = _load_retrieval_pickles(eval_args.dataset_name, eval_args.split)
 
-    results={}
-    cos_results={}
-    for res,cos_res in pool_results:
-        for key,value in res.items():
-            results[key]=value
-        for key,value in cos_res.items():
-            cos_results[key]=value
+        # flatten corpus/queries
+        doc_ids: List[str] = []
+        doc_texts: List[str] = []
+        for pid, value in corpus.items():
+            doc_ids.append(pid)
+            doc_texts.append(value.get("text", "").strip())
 
-    #### Evaluate your model with NDCG@k, MAP@K, Recall@K and Precision@K  where k = [1,3,5,10,100,1000]
+        query_ids: List[str] = []
+        query_texts: List[str] = []
+        for qid, text in queries.items():
+            query_ids.append(qid)
+            query_texts.append(text.strip())
 
-    ret=0
-    if results!={}:
-        print("sparsity contradiction retrieval results")
-        print("sparsity contradiction retrieval results",file=output_file)
-        ndcg, _map, recall, precision = retriever.evaluate(qrels, results, [1,10])
-        print(ndcg,recall)
-        print(ndcg,recall,file=output_file)
-        ret=ndcg["NDCG@10"]
-        if sim_qrels is not None:
-            print("sparsity similarity retrieval results")
-            print("sparsity similarity retrieval results",file=output_file)
-            ndcg, _map, recall, precision = retriever.evaluate(sim_qrels, results, [1,10])
-            print(ndcg,recall)
-            print(ndcg,recall,file=output_file)
+        print(f"Corpus size = {len(doc_ids)} docs, Query size = {len(query_ids)}")
 
-    if cos_results!={}:
-        print("cos contradiction retrieval results")
-        print("cos contradiction retrieval results",file=output_file)
-        ndcg, _map, recall, precision = retriever.evaluate(qrels, cos_results, [1,10])
-        print(ndcg,recall)
-        print(ndcg,recall,file=output_file)
-        if sim_qrels is not None:
-            print("cos similarity retrieval results")
-            print("cos similarity retrieval results",file=output_file)
-            ndcg, _map, recall, precision = retriever.evaluate(sim_qrels, cos_results, [1,10])
-            print(ndcg,recall)
-            print(ndcg,recall,file=output_file)
+        # load encoder
+        model, tokenizer = _load_encoder(model_args)
 
-    print(ret,file=output_file)
-    return ret
+        # encode
+        doc_emb = _encode_texts(model_args, doc_texts, is_query=False, model=model, tokenizer=tokenizer)
+        query_emb = _encode_texts(model_args, query_texts, is_query=True, model=model, tokenizer=tokenizer)
 
-def hyper_parameter_selection(interval,bins=10,eps=0.01):
-    global alpha
+        doc_np = doc_emb.numpy().astype("float32")
+        query_np = query_emb.numpy().astype("float32")
+        dim = int(doc_np.shape[1])
 
-    l=interval[0]
-    r=interval[1]
-    while r-l>eps:
-        optimal_value=0
-        optimal_interval=(0,0)
-        for i in range(bins):
-            alpha=l+(i+0.5)*(r-l)/bins
-            print(alpha)
-            print(alpha,file=output_file)
-            value=retrieval_test()
-            if value>optimal_value:
-                optimal_value=value
-                optimal_interval=(l+i*(r-l)/bins,l+(i+1)*(r-l)/bins)
-        l=optimal_interval[0]
-        r=optimal_interval[1]
-    return l
+        # index filename tags
+        os.makedirs(eval_args.index_dir, exist_ok=True)
+        model_path = _select_model_path(model_args)
+        idx_tag = os.path.basename(os.path.dirname(os.path.normpath(model_path)))
+        index_file = os.path.join(eval_args.index_dir, f"{eval_args.dataset_name}-{idx_tag}-ip-hnsw.faiss")
+
+        index = _build_or_load_index(doc_np, dim, index_file, overwrite=bool(eval_args.overwrite_index))
+        index.hnsw.efSearch = max(int(eval_args.k_neighbors), 128)
+
+        # search
+        k = int(eval_args.k_neighbors)
+        scores, neighbors = index.search(query_np, k)
+
+        # build BEIR results dict
+        results: Dict[str, Dict[str, float]] = {}
+        for qi, qid in enumerate(query_ids):
+            res_q: Dict[str, float] = {}
+            for rank in range(k):
+                di = int(neighbors[qi, rank])
+                if di < 0:
+                    continue
+                res_q[doc_ids[di]] = float(scores[qi, rank])
+            results[qid] = res_q
+
+        # Evaluate with BEIR helper (model object is unused for metrics, but API needs one)
+        dummy = DRES(models.SentenceBERT("BAAI/bge-base-en-v1.5"), batch_size=16)
+        retriever = EvaluateRetrieval(dummy, score_function="cos_sim")
+        k_values = [1, 3, 5, 10, 100, 1000]
+        ndcg, _map, recall, precision = retriever.evaluate(qrels, results, k_values)
+
+        print("NDCG:", ndcg, file=out_f)
+        print("MAP:", _map, file=out_f)
+        print("Recall:", recall, file=out_f)
+        print("Precision:", precision, file=out_f)
+
+        logger.info("NDCG=%s", ndcg)
+        logger.info("MAP=%s", _map)
+        logger.info("Recall=%s", recall)
+        logger.info("Precision=%s", precision)
+        logger.info("Saved eval to: %s", out_path)
 
 
-second_metric="hoyer"
-
-print(second_metric)
-
-if __name__ == '__main__':
-    if model_args[0].alpha is not None:
-        alpha_choice=model_args[0].alpha
-    else:
-        alpha_choice=None
-        if split=="test":
-            dev_write_path=write_path.replace("test_"+dataset_name,"dev_"+dataset_name)
-            if os.path.exists(os.path.join(dev_write_path,f"{dataset_name}_parallel_output")):
-                with open(os.path.join(dev_write_path,f"{dataset_name}_parallel_output"),"r") as file:
-                    for line in file:
-                        # print(line)
-                        if "final alpha" in line:
-                            parts = line.split()
-                            print("read alpha choice from dev file")
-                            alpha_choice=float(parts[2])
-                            break
-        if alpha_choice is None:
-            alpha_choice=hyper_parameter_selection((0,10),bins=10,eps=0.01)
-            print("hyper paramter selection")
-
-    alpha=alpha_choice
-    print("final alpha",alpha)
-    print("final alpha",alpha,file=output_file)
-
-    retrieval_test()
+if __name__ == "__main__":
+    main()
