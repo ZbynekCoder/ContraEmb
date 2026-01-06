@@ -59,6 +59,8 @@ class ModelArguments:
     # ===== query-side transform =====
     use_query_transform: bool = field(default=False)
     query_transform_scale: float = field(default=1.0)
+    query_transform_dropout: float = field(default=0.1)
+    query_transform_init_std: float = field(default=0.02)
 
     # ===== compatibility fields (IMPORTANT) =====
     # your our_BertForCL __init__ reads these from model_args
