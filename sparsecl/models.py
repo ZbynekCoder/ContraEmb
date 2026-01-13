@@ -633,3 +633,360 @@ class our_BertForCL(BertPreTrainedModel):
                 mlm_input_ids=mlm_input_ids,
                 mlm_labels=mlm_labels,
             )
+
+# =========================
+# Dual Encoder (Route C): doc tower frozen, query tower finetuned
+# =========================
+
+class DualBertForCL(BertPreTrainedModel):
+    """
+    Asymmetric dual-tower bi-encoder for contrastive learning:
+      - query_bert: trainable (finetune)
+      - doc_bert: frozen (no grad)
+    Input format is SAME as current training pipeline:
+      input_ids: (bs, num_sent, L) where:
+        sentence0 = query/anchor
+        sentence1 = positive doc
+        sentence2.. = hard negatives (optional)
+    """
+    _keys_to_ignore_on_load_missing = [r"position_ids"]
+
+    def __init__(self, config, *model_args, **model_kargs):
+        super().__init__(config)
+        self.model_args = model_kargs["model_args"]
+
+        # mark in config for auto-detection in eval
+        try:
+            self.config.dual_encoder = True
+        except Exception:
+            pass
+
+        # two towers
+        self.query_bert = BertModel(config, add_pooling_layer=False)
+        self.doc_bert = BertModel(config, add_pooling_layer=False)
+
+        if self.model_args.do_mlm:
+            self.lm_head = BertLMPredictionHead(config)
+
+        # tracking (keep same keys as your current model for trainer logging)
+        self.custom_epoch_info = {
+            "loss": [], "cl_loss": [], "sparsity_loss": [],
+            "l1l2_ratio_z12": [], "l1l2_ratio_z13": [], "l1l2_ratio_z13_all": [],
+            "l2l1_ratio_z12": [], "l2l1_ratio_z13": [], "l2l1_ratio_z13_all": [],
+            "l422_ratio_z12": [], "l422_ratio_z13": [], "l422_ratio_z13_all": [],
+        }
+
+        # init pooler/sim/query_transform etc (reuse your existing logic)
+        cl_init(self, config)
+
+        self.post_init()
+
+    def _encode_with(self, encoder, input_ids, attention_mask, token_type_ids=None,
+                     position_ids=None, head_mask=None, inputs_embeds=None,
+                     output_attentions=None, output_hidden_states=None, return_dict=True):
+        return encoder(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=True if self.model_args.pooler_type in ['avg_top2', 'avg_first_last'] else False,
+            return_dict=True,
+        )
+
+    def _sentemb_forward_with(self, encoder, input_ids=None, attention_mask=None,
+                              token_type_ids=None, position_ids=None, head_mask=None,
+                              inputs_embeds=None, output_attentions=None,
+                              output_hidden_states=None, return_dict=None):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        outputs = self._encode_with(
+            encoder,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+        pooler_output = self.pooler(attention_mask, outputs)
+        if not return_dict:
+            return (outputs[0], pooler_output) + outputs[2:]
+        return BaseModelOutputWithPoolingAndCrossAttentions(
+            pooler_output=pooler_output,
+            last_hidden_state=outputs.last_hidden_state,
+            hidden_states=outputs.hidden_states,
+        )
+
+    def _dual_cl_forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        mlm_input_ids=None,
+        mlm_labels=None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        batch_size = input_ids.size(0)
+        num_sent = input_ids.size(1)
+        assert num_sent >= 2, "Dual encoder needs at least (query, pos_doc)."
+
+        # split query (sent0) vs docs (sent1..)
+        q_input_ids = input_ids[:, 0, :]
+        q_attn = attention_mask[:, 0, :]
+        q_tti = token_type_ids[:, 0, :] if token_type_ids is not None else None
+
+        d_input_ids = input_ids[:, 1:, :].contiguous().view(-1, input_ids.size(-1))
+        d_attn = attention_mask[:, 1:, :].contiguous().view(-1, attention_mask.size(-1))
+        d_tti = token_type_ids[:, 1:, :].contiguous().view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
+
+        # ---- query tower (trainable) ----
+        q_outputs = self._encode_with(
+            self.query_bert,
+            input_ids=q_input_ids,
+            attention_mask=q_attn,
+            token_type_ids=q_tti,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+        zq = self.pooler(q_attn, q_outputs)  # (bs, H)
+
+        # optional query-side transform (still supported)
+        if getattr(self.model_args, "use_query_transform", False):
+            scale = float(getattr(self.model_args, "query_transform_scale", 1.0))
+            if hasattr(self, "query_transform") and self.query_transform is not None:
+                zq = zq + scale * self.query_transform_dropout(self.query_transform(zq))
+                zq = F.normalize(zq, p=2, dim=-1)
+
+        # ---- doc tower (frozen) ----
+        # If doc tower is frozen, using no_grad saves memory and keeps it strictly anchor space.
+        if not hasattr(self, "_dbg_doc"):
+            print("[DBG] doc_bert.training =", self.doc_bert.training)
+            self._dbg_doc = True
+        doc_frozen = bool(getattr(self.model_args, "freeze_doc_encoder", True))
+        if doc_frozen:
+            with torch.no_grad():
+                d_outputs = self._encode_with(
+                    self.doc_bert,
+                    input_ids=d_input_ids,
+                    attention_mask=d_attn,
+                    token_type_ids=d_tti,
+                    position_ids=position_ids,
+                    head_mask=head_mask,
+                    inputs_embeds=inputs_embeds,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=True,
+                )
+        else:
+            d_outputs = self._encode_with(
+                self.doc_bert,
+                input_ids=d_input_ids,
+                attention_mask=d_attn,
+                token_type_ids=d_tti,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=True,
+            )
+
+        zd_all = self.pooler(d_attn, d_outputs)  # (bs*(num_sent-1), H)
+        zd_all = zd_all.view(batch_size, num_sent - 1, -1)
+        zp = zd_all[:, 0, :]  # positive doc
+        if num_sent > 2:
+            z3 = zd_all[:, 1, :]  # first hard neg (optional)
+        if num_sent > 3:
+            z4 = zd_all[:, 2, :]  # second hard neg (optional)
+
+        # distributed gather (same style as your current model)
+        if dist.is_initialized() and self.training:
+            # gather hard neg first
+            if num_sent >= 3:
+                z3_list = [torch.zeros_like(z3) for _ in range(dist.get_world_size())]
+                dist.all_gather(tensor_list=z3_list, tensor=z3.contiguous())
+                z3_list[dist.get_rank()] = z3
+                z3 = torch.cat(z3_list, 0)
+
+            zq_list = [torch.zeros_like(zq) for _ in range(dist.get_world_size())]
+            zp_list = [torch.zeros_like(zp) for _ in range(dist.get_world_size())]
+            dist.all_gather(tensor_list=zq_list, tensor=zq.contiguous())
+            dist.all_gather(tensor_list=zp_list, tensor=zp.contiguous())
+            zq_list[dist.get_rank()] = zq
+            zp_list[dist.get_rank()] = zp
+            zq = torch.cat(zq_list, 0)
+            zp = torch.cat(zp_list, 0)
+
+        loss_type = self.model_args.loss_type
+
+        # ---------- loss: cosine InfoNCE (default) ----------
+        if loss_type == "cos":
+            cos_sim = self.sim(zq.unsqueeze(1), zp.unsqueeze(0))
+
+            if num_sent >= 3:
+                zq_z3_cos = self.sim(zq.unsqueeze(1), z3.unsqueeze(0))
+                cos_sim = torch.cat([cos_sim, zq_z3_cos], 1)
+
+            labels = torch.arange(cos_sim.size(0)).long().to(self.device)
+            loss_fct = nn.CrossEntropyLoss()
+
+            if num_sent == 3:
+                z3_weight = self.model_args.hard_negative_weight
+                weights = torch.tensor(
+                    [[0.0] * (cos_sim.size(-1) - zq_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (zq_z3_cos.size(-1) - i - 1)
+                     for i in range(zq_z3_cos.size(-1))]
+                ).to(self.device)
+                cos_sim = cos_sim + weights
+
+            loss = loss_fct(cos_sim, labels)
+            self.custom_epoch_info["cl_loss"].append(loss)
+
+        # ---------- loss: reuse your sparsity variants ----------
+        elif loss_type in ["sparsity", "sparsity-l2l1", "sparsity-l422"]:
+            # reuse the same computations but rename:
+            # z1 -> zq, z2 -> zp
+            normalize_z1 = zq / torch.norm(zq, dim=1, keepdim=True)
+            normalize_z2 = zp / torch.norm(zp, dim=1, keepdim=True)
+            normalize_z3 = z3 / torch.norm(z3, dim=1, keepdim=True)
+
+            labels = torch.arange(zq.size(0)).long().to(self.device)
+            loss_fct = nn.CrossEntropyLoss()
+
+            normalized_z12 = normalize_z1 - normalize_z2
+            normalized_z13 = normalize_z1 - normalize_z3
+            normalized_z12_all = normalize_z1.unsqueeze(1) - normalize_z2.unsqueeze(0)
+            normalized_z13_all = normalize_z1.unsqueeze(1) - normalize_z3.unsqueeze(0)
+
+            if loss_type == "sparsity":
+                l1_z12_all = torch.clamp(torch.norm(normalized_z12_all, p=1, dim=-1), min=self.sqrt_hidden_size * 1e-6)
+                l2_z12_all = torch.clamp(torch.norm(normalized_z12_all, p=2, dim=-1), min=1e-6)
+                hoyer_z12 = (self.sqrt_hidden_size - l1_z12_all / l2_z12_all) / (self.sqrt_hidden_size - 1) / self.model_args.temp
+
+                l1_z13_all = torch.clamp(torch.norm(normalized_z13_all, p=1, dim=-1), min=self.sqrt_hidden_size * 1e-6)
+                l2_z13_all = torch.clamp(torch.norm(normalized_z13_all, p=2, dim=-1), min=1e-6)
+
+                weights = torch.tensor([[0.0] * i + [self.model_args.hard_negative_weight] + [0.0] * (z3.size(0) - i - 1)
+                                        for i in range(z3.size(0))]).to(self.device)
+                hoyer_z13 = (self.sqrt_hidden_size + weights - l1_z13_all / l2_z13_all) / (self.sqrt_hidden_size - 1) / self.model_args.temp
+
+                logits = torch.cat([hoyer_z12, hoyer_z13], 1)
+                loss = loss_fct(logits, labels)
+                self.custom_epoch_info["sparsity_loss"].append(loss)
+
+            elif loss_type == "sparsity-l2l1":
+                l1_z12_all = torch.clamp(torch.norm(normalized_z12_all, p=1, dim=-1), min=1e-6)
+                l2_z12_all = torch.norm(normalized_z12_all, p=2, dim=-1)
+                l2l1_z12 = l2_z12_all / l1_z12_all / self.model_args.temp
+
+                l1_z13_all = torch.clamp(torch.norm(normalized_z13_all, p=1, dim=-1), min=1e-6)
+                l2_z13_all = torch.norm(normalized_z13_all, p=2, dim=-1)
+                l2l1_z13 = l2_z13_all / l1_z13_all / self.model_args.temp
+
+                logits = torch.cat([l2l1_z12, l2l1_z13], 1)
+                loss = loss_fct(logits, labels)
+                self.custom_epoch_info["sparsity_loss"].append(loss)
+
+            elif loss_type == "sparsity-l422":
+                l4_z12_all = torch.sum(torch.pow(normalized_z12_all, 4), dim=-1)
+                l22_z12_all = torch.clamp(torch.pow(torch.sum(torch.pow(normalized_z12_all, 2), dim=-1), 2), min=1e-6)
+                l422_z12 = l4_z12_all / l22_z12_all / self.model_args.temp
+
+                l4_z13_all = torch.sum(torch.pow(normalized_z13_all, 4), dim=-1)
+                l22_z13_all = torch.clamp(torch.pow(torch.sum(torch.pow(normalized_z13_all, 2), dim=-1), 2), min=1e-6)
+                l422_z13 = l4_z13_all / l22_z13_all / self.model_args.temp
+
+                logits = torch.cat([l422_z12, l422_z13], 1)
+                loss = loss_fct(logits, labels)
+                self.custom_epoch_info["sparsity_loss"].append(loss)
+
+            cos_sim = None
+
+        else:
+            raise ValueError(f"Unknown loss_type={loss_type}")
+
+        if not return_dict:
+            output = (cos_sim,) + q_outputs[2:]
+            return ((loss,) + output) if loss is not None else output
+
+        return SequenceClassifierOutput(
+            loss=loss,
+            logits=cos_sim,
+            hidden_states=q_outputs.hidden_states,
+            attentions=q_outputs.attentions,
+        )
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        sent_emb=False,
+        is_query: bool = True,   # only used when sent_emb=True
+        mlm_input_ids=None,
+        mlm_labels=None,
+    ):
+        if sent_emb:
+            flag = "_dbg_printed_query" if is_query else "_dbg_printed_doc"
+            if not hasattr(self, flag):
+                print("[DBG] sent_emb tower =", "query_bert" if is_query else "doc_bert")
+                setattr(self, flag, True)
+
+
+            encoder = self.query_bert if is_query else self.doc_bert
+            return self._sentemb_forward_with(
+                encoder,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                position_ids=position_ids,
+                head_mask=head_mask,
+                inputs_embeds=inputs_embeds,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+        return self._dual_cl_forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            mlm_input_ids=mlm_input_ids,
+            mlm_labels=mlm_labels,
+        )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode and getattr(self.model_args, "freeze_doc_encoder", True):
+            self.doc_bert.eval()
+        return self
+

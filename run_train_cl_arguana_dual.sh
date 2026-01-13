@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=7
 
 LR=5e-5
 EP=3
-FB=False
+TEMP=0.02
 HNW=0.0
-TEMP=0.015
 QTD=0.1
 QTS=1.0
 QTIS=0.02
@@ -16,10 +15,10 @@ BGE=BAAI/bge-base-en-v1.5
 UAE=WhereIsAI/UAE-Large-V1
 GTE=Alibaba-NLP/gte-large-en-v1.5
 
-MODEL=${BGE}
+MODEL=BGE
 
 TS=$(date +"%Y%m%d-%H%M%S")
-OUT_DIR=results/arguana/${MODEL}/queryT_linear/lr${LR}_ep${EP}_fb${FB}_hnw${HNW}_temp${TEMP}_qtd${QTD}_qts${QTS}_qtis${QTIS}/${TS}
+OUT_DIR=results/arguana/${MODEL}/dual_tower/lr${LR}_ep${EP}_temp${TEMP}_hnw${HNW}/${TS}
 
 mkdir -p ${OUT_DIR}
 cp "$0" "${OUT_DIR}/run_train.sh"
@@ -40,8 +39,11 @@ QueryTransform:
 EOF
 
 python train.py \
-  --model_name our_bge \
+  --model_name our_model \
   --model_name_or_path ${MODEL} \
+  --doc_model_name_or_path ${MODEL} \
+  --use_dual_encoder True \
+  --freeze_doc_encoder True \
   --train_file data/arguana_training_final.csv \
   --eval_file data/arguana_validation_final.csv \
   --output_dir ${OUT_DIR}/model \
@@ -64,9 +66,5 @@ python train.py \
   --logging_steps 50 \
   --save_strategy no \
   --evaluation_strategy no \
-  --use_query_transform True \
-  --freeze_backbone ${FB} \
-  --query_transform_dropout ${QTD} \
-  --query_transform_scale ${QTS} \
-  --query_transform_init_std ${QTIS} \
+  --use_query_transform False \
   2>&1 | tee ${OUT_DIR}/train.log

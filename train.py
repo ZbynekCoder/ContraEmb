@@ -35,7 +35,7 @@ from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 # from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
 from transformers.file_utils import cached_property,  is_torch_available, is_torch_tpu_available
-from sparsecl.models import our_BertForCL
+from sparsecl.models import our_BertForCL, DualBertForCL
 from sparsecl.trainers import CLTrainer
 
 from sparsecl.gte.modeling import NewModelForCL
@@ -132,6 +132,20 @@ class ModelArguments:
         metadata={"help": "If True, freeze the encoder backbone and only train query-side modules (e.g., query_transform)."}
     )
     # ====== END ADD ======
+
+    # ====== Route C: asymmetric dual-encoder ======
+    use_dual_encoder: bool = field(
+        default=False,
+        metadata={"help": "If True, use DualBertForCL: doc tower frozen + query tower finetune."}
+    )
+    doc_model_name_or_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Optional doc-tower checkpoint. If None, use model_name_or_path."}
+    )
+    freeze_doc_encoder: bool = field(
+        default=True,
+        metadata={"help": "If True, freeze doc tower (Route C default)."}
+    )
 
     do_mlm: bool = field(
         default=False,
@@ -409,47 +423,94 @@ def main():
         )
 
     if model_args.model_name_or_path:
-        if "our_bge" in model_args.model_name or "our_uae" in model_args.model_name:
-            model = our_BertForCL.from_pretrained(
+        if model_args.use_dual_encoder:
+            # Route C: Dual tower (BERT-like encoders only)
+            if not ("our_bge" in model_args.model_name or "our_uae" in model_args.model_name):
+                raise ValueError("DualBertForCL currently supports our_bge / our_uae style checkpoints (BERT-like).")
+
+            # build dual model with same config
+            model = DualBertForCL(config, model_args=model_args)
+
+            # load query tower weights from model_name_or_path
+            query_init = BertModel.from_pretrained(
                 model_args.model_name_or_path,
-                from_tf=bool(".ckpt" in model_args.model_name_or_path),
-                config=config,
-                cache_dir=model_args.cache_dir,
-                revision=model_args.model_revision,
-                use_auth_token=True if model_args.use_auth_token else None,
-                model_args=model_args
-            )
-        elif "our_gte" in model_args.model_name:
-            model = NewModelForCL.from_pretrained(
-                model_args.model_name_or_path,
-                model_args=model_args,
-                config=config,
-                add_pooling_layer=True,
+                add_pooling_layer=False,
                 trust_remote_code=True,
             )
+            model.query_bert.load_state_dict(query_init.state_dict())
+
+            # load doc tower weights (optional separate path)
+            doc_path = model_args.doc_model_name_or_path or model_args.model_name_or_path
+            doc_init = BertModel.from_pretrained(
+                doc_path,
+                add_pooling_layer=False,
+                trust_remote_code=True,
+            )
+            model.doc_bert.load_state_dict(doc_init.state_dict())
+
+        else:
+            # ===== your original single-tower logic =====
+            if "our_bge" in model_args.model_name or "our_uae" in model_args.model_name:
+                model = our_BertForCL.from_pretrained(
+                    model_args.model_name_or_path,
+                    from_tf=bool(".ckpt" in model_args.model_name_or_path),
+                    config=config,
+                    cache_dir=model_args.cache_dir,
+                    revision=model_args.model_revision,
+                    use_auth_token=True if model_args.use_auth_token else None,
+                    model_args=model_args
+                )
+            elif "our_gte" in model_args.model_name:
+                model = NewModelForCL.from_pretrained(
+                    model_args.model_name_or_path,
+                    model_args=model_args,
+                    config=config,
+                    add_pooling_layer=True,
+                    trust_remote_code=True,
+                )
     else:
         raise NotImplementedError
         logger.info("Training new model from scratch")
         model = AutoModelForMaskedLM.from_config(config)
 
-    model.resize_token_embeddings(len(tokenizer))
-    # ================== FREEZE BACKBONE ==================
-    if model_args.freeze_backbone:
-        print(">>> Freezing backbone encoder parameters")
+    new_n = len(tokenizer)
+    old_n = getattr(model.config, "vocab_size", None)
 
-        for name, param in model.named_parameters():
-            # 默认全部冻结
-            param.requires_grad = False
+    if old_n is None or new_n != old_n:
+        model.resize_token_embeddings(new_n)
 
-            # 只放开 query-side transform（你的 T）
-            if "query_transform" in name:
-                param.requires_grad = True
+    # ================== FREEZE POLICY ==================
+    if model_args.use_dual_encoder:
+        # Route C: freeze doc tower only (default), query tower finetune
+        if model_args.freeze_doc_encoder:
+            print(">>> [Route C] Freezing doc tower parameters")
+            for n, p in model.doc_bert.named_parameters():
+                p.requires_grad = False
 
-            # 如果你想让 pooler 也一起训（可选）
-            if "pooler" in name:
-                param.requires_grad = True
+        # optional: if you still want query_transform only, you can also freeze query tower
+        # (not Route C typical, but kept for flexibility)
+        # if getattr(model_args, "freeze_query_encoder", False):
+        #     for n, p in model.query_bert.named_parameters():
+        #         p.requires_grad = False
 
-    # sanity check：打印可训练参数
+        # query_transform (if enabled) should remain trainable
+        if getattr(model_args, "use_query_transform", False):
+            for n, p in model.named_parameters():
+                if "query_transform" in n:
+                    p.requires_grad = True
+
+    else:
+        # Original behavior: freeze backbone (single encoder) and train only query_transform
+        if model_args.freeze_backbone:
+            print(">>> Freezing backbone encoder parameters")
+            for name, param in model.named_parameters():
+                param.requires_grad = False
+                if "query_transform" in name:
+                    param.requires_grad = True
+                if "pooler" in name:
+                    param.requires_grad = True
+
+    # sanity check：print trainables
     trainable = [n for n, p in model.named_parameters() if p.requires_grad]
     print(">>> Trainable parameters:")
     for n in trainable:

@@ -3,17 +3,11 @@ set -e
 
 export CUDA_VISIBLE_DEVICES=1
 
-BGE=BAAI/bge-base-en-v1.5
-UAE=WhereIsAI/UAE-Large-V1
-GTE=Alibaba-NLP/gte-large-en-v1.5
-
-TRAIN_DIR=BAAI/bge-base-en-v1.5
-
-cp "$0" "${TRAIN_DIR}/run_dev.sh"
+TS=$(date +"%Y%m%d-%H%M%S")
+TRAIN_DIR=results/arguana/dual_tower/lr5e-5_ep3_temp0.02_hnw0.0/20260106-183042
 
 TS=$(date +"%Y%m%d-%H%M%S")
-OUT_DIR=test_results/arguana_cos_only/dev/${TS}
-
+OUT_DIR=test_results/arguana_dual/dev/${TS}
 mkdir -p ${OUT_DIR}
 
 python test_contradiction_faiss_final.py \
@@ -25,9 +19,4 @@ python test_contradiction_faiss_final.py \
   --max_seq_length 512 \
   --batch_size 64 \
   --k_neighbors 1000 \
-  --use_query_transform True \
-  --query_transform_scale 1.0 \
   2>&1 | tee ${OUT_DIR}/dev_eval.txt
-
-cp ${OUT_DIR}/dev_eval.txt \
-   ${TRAIN_DIR}/dev_eval.txt

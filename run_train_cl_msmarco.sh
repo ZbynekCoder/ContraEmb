@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=2
 
 LR=5e-5
-EP=3
+EP=1
 FB=False
-HNW=0.5
+HNW=0.0
 TEMP=0.02
 QTD=0.1
 QTS=1.0
 QTIS=0.02
 
+BGE=BAAI/bge-base-en-v1.5
+UAE=WhereIsAI/UAE-Large-V1
+GTE=Alibaba-NLP/gte-large-en-v1.5
+
+MODEL=${BGE}
+
 TS=$(date +"%Y%m%d-%H%M%S")
-OUT_DIR=results/msmarco/queryT_linear/lr${LR}_ep${EP}_fb${FB}_hnw${HNW}_temp${TEMP}/${TS}
+OUT_DIR=results/msmarco/${MODEL}/queryT_linear/lr${LR}_ep${EP}_fb${FB}_hnw${HNW}_temp${TEMP}/${TS}
 
 mkdir -p ${OUT_DIR}
 cp "$0" "${OUT_DIR}/run_train.sh"
 cat <<EOF > ${OUT_DIR}/config.txt
-Task: MSMarco contradiction retrieval
+Task: MSMARCO contradiction retrieval
 Date: $(date)
 
 LR=${LR}
@@ -34,8 +40,8 @@ QueryTransform:
 EOF
 
 python train.py \
-  --model_name our_uae \
-  --model_name_or_path WhereIsAI/UAE-Large-V1 \
+  --model_name our_bge \
+  --model_name_or_path ${MODEL} \
   --train_file data/msmarco_train_gpt4_final.csv \
   --eval_file data/msmarco_dev_gpt4_final.csv \
   --output_dir ${OUT_DIR}/model \

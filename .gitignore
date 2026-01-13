@@ -7,3 +7,10 @@ __pycache__
 *pyc
 *cpython*
 debug*
+/run_train_sparsecl_arguana.sh
+/run_train_cl_msmarco.sh
+/run_train_cl_hotpotqa.sh
+/run_dev_arguana.sh
+/.
+/run_train_cl_arguana.sh
+/run_test_arguana.sh
