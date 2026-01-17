@@ -1,15 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
-BGE=BAAI/bge-base-en-v1.5
-UAE=WhereIsAI/UAE-Large-V1
-GTE=Alibaba-NLP/gte-large-en-v1.5
-
-TRAIN_DIR=BAAI/bge-base-en-v1.5
-
-cp "$0" "${TRAIN_DIR}/run_dev.sh"
+MODEL_DIR=results/arguana/bge/queryT_linear/lr5e-5_ep3_fbFalse_hnw0.0_temp0.02/20260113-185547
 
 TS=$(date +"%Y%m%d-%H%M%S")
 OUT_DIR=test_results/arguana_cos_only/dev/${TS}
@@ -19,7 +13,8 @@ mkdir -p ${OUT_DIR}
 python test_contradiction_faiss_final.py \
   --dataset_name arguana \
   --split dev \
-  --model_name_or_path ${TRAIN_DIR}/model \
+  --model_name_or_path ${MODEL_DIR}/model \
+  --model_name bge \
   --write_path ${OUT_DIR} \
   --pooler_type avg \
   --max_seq_length 512 \
@@ -30,4 +25,4 @@ python test_contradiction_faiss_final.py \
   2>&1 | tee ${OUT_DIR}/dev_eval.txt
 
 cp ${OUT_DIR}/dev_eval.txt \
-   ${TRAIN_DIR}/dev_eval.txt
+   ${MODEL_DIR}/dev_eval.txt

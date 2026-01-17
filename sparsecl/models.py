@@ -6,7 +6,8 @@ import torch.distributed as dist
 import transformers
 from transformers import RobertaTokenizer
 from transformers.models.roberta.modeling_roberta import RobertaPreTrainedModel, RobertaModel, RobertaLMHead
-from transformers.models.bert.modeling_bert import BertPreTrainedModel, BertModel, BertLMPredictionHead, BertEncoder, BertLayer, BertEmbeddings, BertPooler
+from transformers.models.bert.modeling_bert import BertPreTrainedModel, BertModel, BertLMPredictionHead, BertEncoder, \
+    BertLayer, BertEmbeddings, BertPooler
 from transformers.activations import gelu
 from transformers.file_utils import (
     add_code_sample_docstrings,
@@ -14,19 +15,23 @@ from transformers.file_utils import (
     add_start_docstrings_to_model_forward,
     replace_return_docstrings,
 )
-from transformers.modeling_outputs import SequenceClassifierOutput, BaseModelOutputWithPoolingAndCrossAttentions, BaseModelOutputWithPastAndCrossAttentions
+from transformers.modeling_outputs import SequenceClassifierOutput, BaseModelOutputWithPoolingAndCrossAttentions, \
+    BaseModelOutputWithPastAndCrossAttentions
 import math
 from torch.utils.checkpoint import checkpoint
 from typing import List, Optional, Tuple, Union
 import logging
+
 logger = logging.getLogger(__name__)
+
 
 class OurBertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
-        self.gradient_checkpointing = config.gradient_checkpointing if hasattr(config, 'gradient_checkpointing') else False
+        self.gradient_checkpointing = config.gradient_checkpointing if hasattr(config,
+                                                                               'gradient_checkpointing') else False
 
     def _gradient_checkpointing_func(self, layer_call, *args, **kwargs):
         """
@@ -39,17 +44,17 @@ class OurBertEncoder(nn.Module):
         return checkpoint(layer_call, *tensor_args, **kwargs)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        encoder_hidden_states: Optional[torch.FloatTensor] = None,
-        encoder_attention_mask: Optional[torch.FloatTensor] = None,
-        past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = False,
-        output_hidden_states: Optional[bool] = False,
-        return_dict: Optional[bool] = True,
+            self,
+            hidden_states: torch.Tensor,
+            attention_mask: Optional[torch.FloatTensor] = None,
+            head_mask: Optional[torch.FloatTensor] = None,
+            encoder_hidden_states: Optional[torch.FloatTensor] = None,
+            encoder_attention_mask: Optional[torch.FloatTensor] = None,
+            past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = False,
+            output_hidden_states: Optional[bool] = False,
+            return_dict: Optional[bool] = True,
     ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPastAndCrossAttentions]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -133,6 +138,7 @@ class OurBertModel(BertModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+
 class MLPLayer(nn.Module):
     """
     Head for getting sentence representations over RoBERTa/BERT's CLS representation.
@@ -148,6 +154,7 @@ class MLPLayer(nn.Module):
         x = self.activation(x)
 
         return x
+
 
 class Similarity(nn.Module):
     """
@@ -172,10 +179,12 @@ class Pooler(nn.Module):
     'avg_top2': average of the last two layers.
     'avg_first_last': average of the first and the last layers.
     """
+
     def __init__(self, pooler_type):
         super().__init__()
         self.pooler_type = pooler_type
-        assert self.pooler_type in ["cls", "cls_before_pooler", "avg", "avg_top2", "avg_first_last"], "unrecognized pooling type %s" % self.pooler_type
+        assert self.pooler_type in ["cls", "cls_before_pooler", "avg", "avg_top2",
+                                    "avg_first_last"], "unrecognized pooling type %s" % self.pooler_type
 
     def forward(self, attention_mask, outputs):
         last_hidden = outputs.last_hidden_state
@@ -189,15 +198,18 @@ class Pooler(nn.Module):
         elif self.pooler_type == "avg_first_last":
             first_hidden = hidden_states[1]
             last_hidden = hidden_states[-1]
-            pooled_result = ((first_hidden + last_hidden) / 2.0 * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(-1).unsqueeze(-1)
+            pooled_result = ((first_hidden + last_hidden) / 2.0 * attention_mask.unsqueeze(-1)).sum(
+                1) / attention_mask.sum(-1).unsqueeze(-1)
             return pooled_result
         elif self.pooler_type == "avg_top2":
             second_last_hidden = hidden_states[-2]
             last_hidden = hidden_states[-1]
-            pooled_result = ((last_hidden + second_last_hidden) / 2.0 * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(-1).unsqueeze(-1)
+            pooled_result = ((last_hidden + second_last_hidden) / 2.0 * attention_mask.unsqueeze(-1)).sum(
+                1) / attention_mask.sum(-1).unsqueeze(-1)
             return pooled_result
         else:
             raise NotImplementedError
+
 
 def cl_init(cls, config):
     """
@@ -211,10 +223,10 @@ def cl_init(cls, config):
 
     cls.init_weights()
 
-    cls.hidden_size=config.hidden_size
-    cls.sqrt_hidden_size=math.sqrt(cls.hidden_size)
-    cls.current_training_progress=0
-    print(cls.hidden_size,cls.sqrt_hidden_size)
+    cls.hidden_size = config.hidden_size
+    cls.sqrt_hidden_size = math.sqrt(cls.hidden_size)
+    cls.current_training_progress = 0
+    print(cls.hidden_size, cls.sqrt_hidden_size)
 
     # ====== Query-side learnable transform T (only affects anchor/query z1) ======
     cls.use_query_transform = getattr(cls.model_args, "use_query_transform", False)
@@ -231,20 +243,20 @@ def cl_init(cls, config):
 
 
 def our_cl_forward(cls,
-    encoder,
-    input_ids=None,
-    attention_mask=None,
-    token_type_ids=None,
-    position_ids=None,
-    head_mask=None,
-    inputs_embeds=None,
-    labels=None,
-    output_attentions=None,
-    output_hidden_states=None,
-    return_dict=None,
-    mlm_input_ids=None,
-    mlm_labels=None,
-):
+                   encoder,
+                   input_ids=None,
+                   attention_mask=None,
+                   token_type_ids=None,
+                   position_ids=None,
+                   head_mask=None,
+                   inputs_embeds=None,
+                   labels=None,
+                   output_attentions=None,
+                   output_hidden_states=None,
+                   return_dict=None,
+                   mlm_input_ids=None,
+                   mlm_labels=None,
+                   ):
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
     ori_input_ids = input_ids
     batch_size = input_ids.size(0)
@@ -254,10 +266,10 @@ def our_cl_forward(cls,
 
     mlm_outputs = None
     # Flatten input for encoding
-    input_ids = input_ids.view((-1, input_ids.size(-1))) # (bs * num_sent, len)
-    attention_mask = attention_mask.view((-1, attention_mask.size(-1))) # (bs * num_sent len)
+    input_ids = input_ids.view((-1, input_ids.size(-1)))  # (bs * num_sent, len)
+    attention_mask = attention_mask.view((-1, attention_mask.size(-1)))  # (bs * num_sent len)
     if token_type_ids is not None:
-        token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1))) # (bs * num_sent, len)
+        token_type_ids = token_type_ids.view((-1, token_type_ids.size(-1)))  # (bs * num_sent, len)
 
     # Get raw embeddings
     outputs = encoder(
@@ -289,15 +301,15 @@ def our_cl_forward(cls,
 
     # Pooling
     pooler_output = cls.pooler(attention_mask, outputs)
-    pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1))) # (bs, num_sent, hidden)
+    pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1)))  # (bs, num_sent, hidden)
 
     # If using "cls", we add an extra MLP layer
     # (same as BERT's original implementation) over the representation.
     # if cls.pooler_type == "cls":
-        # pooler_output = cls.mlp(pooler_output)
+    # pooler_output = cls.mlp(pooler_output)
 
     # Separate representation
-    z1, z2 = pooler_output[:,0], pooler_output[:,1]
+    z1, z2 = pooler_output[:, 0], pooler_output[:, 1]
 
     # ====== Apply learnable transform T on anchor/query only ======
     if getattr(cls.model_args, "use_query_transform", False):
@@ -309,10 +321,10 @@ def our_cl_forward(cls,
     # ====== End transform ======
 
     # Hard negative
-    if num_sent >2:
+    if num_sent > 2:
         z3 = pooler_output[:, 2]
 
-    if num_sent >3:
+    if num_sent > 3:
         z4 = pooler_output[:, 3]
 
     # Gather all embeddings if using distributed training
@@ -339,11 +351,11 @@ def our_cl_forward(cls,
         z1 = torch.cat(z1_list, 0)
         z2 = torch.cat(z2_list, 0)
 
-    loss_type=cls.model_args.loss_type
+    loss_type = cls.model_args.loss_type
 
     # print(loss_type)
 
-    if loss_type=="cos":
+    if loss_type == "cos":
         cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
         # Hard negative
         if num_sent >= 3:
@@ -358,158 +370,13 @@ def our_cl_forward(cls,
             # Note that weights are actually logits of weights
             z3_weight = cls.model_args.hard_negative_weight
             weights = torch.tensor(
-                [[0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (z1_z3_cos.size(-1) - i - 1) for i in range(z1_z3_cos.size(-1))]
+                [[0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (
+                            z1_z3_cos.size(-1) - i - 1) for i in range(z1_z3_cos.size(-1))]
             ).to(cls.device)
             cos_sim = cos_sim + weights
 
         loss = loss_fct(cos_sim, labels)
         cls.custom_epoch_info["cl_loss"].append(loss)
-    elif loss_type=="sparsity":
-        normalize_z1=z1/torch.norm(z1, dim=1, keepdim=True)
-        normalize_z2=z2/torch.norm(z2, dim=1, keepdim=True)
-        normalize_z3=z3/torch.norm(z3, dim=1, keepdim=True)
-
-        labels = torch.arange(z1.size(0)).long().to(cls.device)
-        loss_fct = nn.CrossEntropyLoss()
-
-        normalized_z12=normalize_z1-normalize_z2
-        normalized_z13=normalize_z1-normalize_z3
-        normalized_z12_all=normalize_z1.unsqueeze(1)-normalize_z2.unsqueeze(0)
-        normalized_z13_all=normalize_z1.unsqueeze(1)-normalize_z3.unsqueeze(0)
-
-
-        l1_normalized_z12=torch.clamp(torch.norm(normalized_z12,p=1,dim=-1),min=cls.sqrt_hidden_size*1e-6)
-        l2_normalized_z12=torch.clamp(torch.norm(normalized_z12,p=2,dim=-1),min=1e-6)
-        l1l2_ratio_z12=torch.mean(l1_normalized_z12/l2_normalized_z12)
-
-        l1_normalized_z13=torch.clamp(torch.norm(normalized_z13,p=1,dim=-1),min=cls.sqrt_hidden_size*1e-6)
-        l2_normalized_z13=torch.clamp(torch.norm(normalized_z13,p=2,dim=-1),min=1e-6)
-        l1l2_ratio_z13=torch.mean(l1_normalized_z13/l2_normalized_z13)
-
-
-        l1_normalized_z12_all=torch.clamp(torch.norm(normalized_z12_all,p=1,dim=-1),min=cls.sqrt_hidden_size*1e-6)
-        l2_normalized_z12_all=torch.clamp(torch.norm(normalized_z12_all,p=2,dim=-1),min=1e-6)
-        l1l2_ratio_z12_all=torch.mean(l1_normalized_z12_all/l2_normalized_z12_all)
-        hoyer_z12=(cls.sqrt_hidden_size-l1_normalized_z12_all/l2_normalized_z12_all)/(cls.sqrt_hidden_size-1)/cls.model_args.temp
-
-        l1_normalized_z13_all=torch.clamp(torch.norm(normalized_z13_all,p=1,dim=-1),min=cls.sqrt_hidden_size*1e-6)
-        l2_normalized_z13_all=torch.clamp(torch.norm(normalized_z13_all,p=2,dim=-1),min=1e-6)
-        l1l2_ratio_z13_all=torch.mean(l1_normalized_z13_all/l2_normalized_z13_all)
-
-        weights = torch.tensor([[0.0] * i + [cls.model_args.hard_negative_weight] + [0.0] * (z3.size(0) - i - 1) for i in range(z3.size(0))]).to(cls.device)
-
-        hoyer_z13=(cls.sqrt_hidden_size+weights-l1_normalized_z13_all/l2_normalized_z13_all)/(cls.sqrt_hidden_size-1)/cls.model_args.temp
-
-        hoyer_sim=torch.cat([hoyer_z12,hoyer_z13],1)
-
-        cos_sim=hoyer_sim
-
-        sparsity_loss=loss_fct(hoyer_sim,labels)
-
-        loss=sparsity_loss
-
-        # cls.custom_epoch_info["cl_loss"].append(cl_loss)
-        cls.custom_epoch_info["sparsity_loss"].append(sparsity_loss)
-        cls.custom_epoch_info["l1l2_ratio_z12"].append(l1l2_ratio_z12)
-        cls.custom_epoch_info["l1l2_ratio_z13"].append(l1l2_ratio_z13)
-        cls.custom_epoch_info["l1l2_ratio_z13_all"].append(l1l2_ratio_z13_all)
-    elif loss_type=="sparsity-l2l1":
-        normalize_z1=z1/torch.norm(z1, dim=1, keepdim=True)
-        normalize_z2=z2/torch.norm(z2, dim=1, keepdim=True)
-        normalize_z3=z3/torch.norm(z3, dim=1, keepdim=True)
-
-        labels = torch.arange(z1.size(0)).long().to(cls.device)
-        loss_fct = nn.CrossEntropyLoss()
-
-        normalized_z12=normalize_z1-normalize_z2
-        normalized_z13=normalize_z1-normalize_z3
-        normalized_z12_all=normalize_z1.unsqueeze(1)-normalize_z2.unsqueeze(0)
-        normalized_z13_all=normalize_z1.unsqueeze(1)-normalize_z3.unsqueeze(0)
-
-
-        l1_normalized_z12=torch.clamp(torch.norm(normalized_z12,p=1,dim=-1),min=1e-6)
-        l2_normalized_z12=torch.norm(normalized_z12,p=2,dim=-1)
-        l2l1_ratio_z12=torch.mean(l2_normalized_z12/l1_normalized_z12)
-
-        l1_normalized_z13=torch.clamp(torch.norm(normalized_z13,p=1,dim=-1),min=1e-6)
-        l2_normalized_z13=torch.norm(normalized_z13,p=2,dim=-1)
-        l2l1_ratio_z13=torch.mean(l2_normalized_z13/l1_normalized_z13)
-
-
-        l1_normalized_z12_all=torch.clamp(torch.norm(normalized_z12_all,p=1,dim=-1),min=1e-6)
-        l2_normalized_z12_all=torch.norm(normalized_z12_all,p=2,dim=-1)
-        l2l1_ratio_z12_all=torch.mean(l2_normalized_z12_all/l1_normalized_z12_all)
-        l2l1_z12=l2_normalized_z12_all/l1_normalized_z12_all/cls.model_args.temp
-
-        l1_normalized_z13_all=torch.clamp(torch.norm(normalized_z13_all,p=1,dim=-1),min=1e-6)
-        l2_normalized_z13_all=torch.norm(normalized_z13_all,p=2,dim=-1)
-        l2l1_ratio_z13_all=torch.mean(l2_normalized_z13_all/l1_normalized_z13_all)
-
-        weights = torch.tensor([[0.0] * i + [cls.model_args.hard_negative_weight] + [0.0] * (z3.size(0) - i - 1) for i in range(z3.size(0))]).to(cls.device)
-
-        l2l1_z13=l2_normalized_z13_all/l1_normalized_z13_all/cls.model_args.temp
-
-        l2l1_sim=torch.cat([l2l1_z12,l2l1_z13],1)
-
-        cos_sim=None
-
-        sparsity_loss=loss_fct(l2l1_sim,labels)
-
-        loss=sparsity_loss
-
-        # cls.custom_epoch_info["cl_loss"].append(cl_loss)
-        cls.custom_epoch_info["sparsity_loss"].append(sparsity_loss)
-        cls.custom_epoch_info["l2l1_ratio_z12"].append(l2l1_ratio_z12)
-        cls.custom_epoch_info["l2l1_ratio_z13"].append(l2l1_ratio_z13)
-        cls.custom_epoch_info["l2l1_ratio_z13_all"].append(l2l1_ratio_z13_all)
-    elif loss_type=="sparsity-l422":
-        normalize_z1=z1/torch.norm(z1, dim=1, keepdim=True)
-        normalize_z2=z2/torch.norm(z2, dim=1, keepdim=True)
-        normalize_z3=z3/torch.norm(z3, dim=1, keepdim=True)
-
-        labels = torch.arange(z1.size(0)).long().to(cls.device)
-        loss_fct = nn.CrossEntropyLoss()
-
-        normalized_z12=normalize_z1-normalize_z2
-        normalized_z13=normalize_z1-normalize_z3
-        normalized_z12_all=normalize_z1.unsqueeze(1)-normalize_z2.unsqueeze(0)
-        normalized_z13_all=normalize_z1.unsqueeze(1)-normalize_z3.unsqueeze(0)
-
-
-        l4_normalized_z12=torch.sum(torch.pow(normalized_z12,4),dim=-1)
-        l22_normalized_z12=torch.clamp(torch.pow(torch.sum(torch.pow(normalized_z12,2),dim=-1),2),min=1e-6)
-        l422_ratio_z12=torch.mean(l4_normalized_z12/l22_normalized_z12)
-
-        l4_normalized_z13=torch.sum(torch.pow(normalized_z13,4),dim=-1)
-        l22_normalized_z13=torch.clamp(torch.pow(torch.sum(torch.pow(normalized_z13,2),dim=-1),2),min=1e-6)
-        l422_ratio_z13=torch.mean(l4_normalized_z13/l22_normalized_z13)
-
-
-        l4_normalized_z12_all=torch.sum(torch.pow(normalized_z12_all,4),dim=-1)
-        l22_normalized_z12_all=torch.clamp(torch.pow(torch.sum(torch.pow(normalized_z12_all,2),dim=-1),2),min=1e-6)
-        l422_ratio_z12_all=torch.mean(l4_normalized_z12_all/l22_normalized_z12)
-        l422_z12=l4_normalized_z12_all/l22_normalized_z12_all/cls.model_args.temp
-
-        l4_normalized_z13_all=torch.sum(torch.pow(normalized_z13_all,4),dim=-1)
-        l22_normalized_z13_all=torch.clamp(torch.pow(torch.sum(torch.pow(normalized_z13_all,2),dim=-1),2),min=1e-6)
-        l422_ratio_z13_all=torch.mean(l4_normalized_z13_all/l22_normalized_z13)
-        l422_z13=l4_normalized_z13_all/l22_normalized_z13_all/cls.model_args.temp
-
-        weights = torch.tensor([[0.0] * i + [cls.model_args.hard_negative_weight] + [0.0] * (z3.size(0) - i - 1) for i in range(z3.size(0))]).to(cls.device)
-
-        l422_sim=torch.cat([l422_z12,l422_z13],1)
-
-        cos_sim=None
-
-        sparsity_loss=loss_fct(l422_sim,labels)
-
-        loss=sparsity_loss
-
-        # cls.custom_epoch_info["cl_loss"].append(cl_loss)
-        cls.custom_epoch_info["sparsity_loss"].append(sparsity_loss)
-        cls.custom_epoch_info["l422_ratio_z12"].append(l422_ratio_z12)
-        cls.custom_epoch_info["l422_ratio_z13"].append(l422_ratio_z13)
-        cls.custom_epoch_info["l422_ratio_z13_all"].append(l422_ratio_z13_all)
 
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:
@@ -528,21 +395,21 @@ def our_cl_forward(cls,
         attentions=outputs.attentions,
     )
 
-def sentemb_forward(
-    cls,
-    encoder,
-    input_ids=None,
-    attention_mask=None,
-    token_type_ids=None,
-    position_ids=None,
-    head_mask=None,
-    inputs_embeds=None,
-    labels=None,
-    output_attentions=None,
-    output_hidden_states=None,
-    return_dict=None,
-):
 
+def sentemb_forward(
+        cls,
+        encoder,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+):
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
 
     outputs = encoder(
@@ -559,7 +426,7 @@ def sentemb_forward(
 
     pooler_output = cls.pooler(attention_mask, outputs)
     # if cls.pooler_type == "cls" and not cls.model_args.mlp_only_train:
-        # pooler_output = cls.mlp(pooler_output)
+    # pooler_output = cls.mlp(pooler_output)
 
     if not return_dict:
         return (outputs[0], pooler_output) + outputs[2:]
@@ -581,58 +448,56 @@ class our_BertForCL(BertPreTrainedModel):
 
         if self.model_args.do_mlm:
             self.lm_head = BertLMPredictionHead(config)
-        self.custom_epoch_info={    "loss":[],"cl_loss": [], "sparsity_loss":[],
-                                    "l1l2_ratio_z12":[],"l1l2_ratio_z13":[],"l1l2_ratio_z13_all":[],
-                                    "l2l1_ratio_z12":[],"l2l1_ratio_z13":[],"l2l1_ratio_z13_all":[],
-                                    "l422_ratio_z12":[],"l422_ratio_z13":[],"l422_ratio_z13_all":[],
-                                }
-        # self.custom_epoch_info = {"cl_loss": [], "sparsity_loss": [], "l1l2_ratio_z12": [], "l1l2_ratio_z13": [], "l1l2_ratio_z13_all": []}
-
+        self.custom_epoch_info = {
+            "loss": [],
+            "cl_loss": []
+        }
         cl_init(self, config)
 
     def forward(self,
-        input_ids=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        labels=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        sent_emb=False,
-        mlm_input_ids=None,
-        mlm_labels=None,
-    ):
+                input_ids=None,
+                attention_mask=None,
+                token_type_ids=None,
+                position_ids=None,
+                head_mask=None,
+                inputs_embeds=None,
+                labels=None,
+                output_attentions=None,
+                output_hidden_states=None,
+                return_dict=None,
+                sent_emb=False,
+                mlm_input_ids=None,
+                mlm_labels=None,
+                ):
         if sent_emb:
             return sentemb_forward(self, self.bert,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                token_type_ids=token_type_ids,
-                position_ids=position_ids,
-                head_mask=head_mask,
-                inputs_embeds=inputs_embeds,
-                labels=labels,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
+                                   input_ids=input_ids,
+                                   attention_mask=attention_mask,
+                                   token_type_ids=token_type_ids,
+                                   position_ids=position_ids,
+                                   head_mask=head_mask,
+                                   inputs_embeds=inputs_embeds,
+                                   labels=labels,
+                                   output_attentions=output_attentions,
+                                   output_hidden_states=output_hidden_states,
+                                   return_dict=return_dict,
+                                   )
         else:
             return our_cl_forward(self, self.bert,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                token_type_ids=token_type_ids,
-                position_ids=position_ids,
-                head_mask=head_mask,
-                inputs_embeds=inputs_embeds,
-                labels=labels,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                mlm_input_ids=mlm_input_ids,
-                mlm_labels=mlm_labels,
-            )
+                                  input_ids=input_ids,
+                                  attention_mask=attention_mask,
+                                  token_type_ids=token_type_ids,
+                                  position_ids=position_ids,
+                                  head_mask=head_mask,
+                                  inputs_embeds=inputs_embeds,
+                                  labels=labels,
+                                  output_attentions=output_attentions,
+                                  output_hidden_states=output_hidden_states,
+                                  return_dict=return_dict,
+                                  mlm_input_ids=mlm_input_ids,
+                                  mlm_labels=mlm_labels,
+                                  )
+
 
 # =========================
 # Dual Encoder (Route C): doc tower frozen, query tower finetuned
@@ -670,10 +535,8 @@ class DualBertForCL(BertPreTrainedModel):
 
         # tracking (keep same keys as your current model for trainer logging)
         self.custom_epoch_info = {
-            "loss": [], "cl_loss": [], "sparsity_loss": [],
-            "l1l2_ratio_z12": [], "l1l2_ratio_z13": [], "l1l2_ratio_z13_all": [],
-            "l2l1_ratio_z12": [], "l2l1_ratio_z13": [], "l2l1_ratio_z13_all": [],
-            "l422_ratio_z12": [], "l422_ratio_z13": [], "l422_ratio_z13_all": [],
+            "loss": [],
+            "cl_loss": []
         }
 
         # init pooler/sim/query_transform etc (reuse your existing logic)
@@ -723,19 +586,19 @@ class DualBertForCL(BertPreTrainedModel):
         )
 
     def _dual_cl_forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        labels=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        mlm_input_ids=None,
-        mlm_labels=None,
+            self,
+            input_ids=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            labels=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+            mlm_input_ids=None,
+            mlm_labels=None,
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -750,7 +613,8 @@ class DualBertForCL(BertPreTrainedModel):
 
         d_input_ids = input_ids[:, 1:, :].contiguous().view(-1, input_ids.size(-1))
         d_attn = attention_mask[:, 1:, :].contiguous().view(-1, attention_mask.size(-1))
-        d_tti = token_type_ids[:, 1:, :].contiguous().view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
+        d_tti = token_type_ids[:, 1:, :].contiguous().view(-1, token_type_ids.size(
+            -1)) if token_type_ids is not None else None
 
         # ---- query tower (trainable) ----
         q_outputs = self._encode_with(
@@ -776,9 +640,6 @@ class DualBertForCL(BertPreTrainedModel):
 
         # ---- doc tower (frozen) ----
         # If doc tower is frozen, using no_grad saves memory and keeps it strictly anchor space.
-        if not hasattr(self, "_dbg_doc"):
-            print("[DBG] doc_bert.training =", self.doc_bert.training)
-            self._dbg_doc = True
         doc_frozen = bool(getattr(self.model_args, "freeze_doc_encoder", True))
         if doc_frozen:
             with torch.no_grad():
@@ -850,73 +711,14 @@ class DualBertForCL(BertPreTrainedModel):
             if num_sent == 3:
                 z3_weight = self.model_args.hard_negative_weight
                 weights = torch.tensor(
-                    [[0.0] * (cos_sim.size(-1) - zq_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (zq_z3_cos.size(-1) - i - 1)
+                    [[0.0] * (cos_sim.size(-1) - zq_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (
+                                zq_z3_cos.size(-1) - i - 1)
                      for i in range(zq_z3_cos.size(-1))]
                 ).to(self.device)
                 cos_sim = cos_sim + weights
 
             loss = loss_fct(cos_sim, labels)
             self.custom_epoch_info["cl_loss"].append(loss)
-
-        # ---------- loss: reuse your sparsity variants ----------
-        elif loss_type in ["sparsity", "sparsity-l2l1", "sparsity-l422"]:
-            # reuse the same computations but rename:
-            # z1 -> zq, z2 -> zp
-            normalize_z1 = zq / torch.norm(zq, dim=1, keepdim=True)
-            normalize_z2 = zp / torch.norm(zp, dim=1, keepdim=True)
-            normalize_z3 = z3 / torch.norm(z3, dim=1, keepdim=True)
-
-            labels = torch.arange(zq.size(0)).long().to(self.device)
-            loss_fct = nn.CrossEntropyLoss()
-
-            normalized_z12 = normalize_z1 - normalize_z2
-            normalized_z13 = normalize_z1 - normalize_z3
-            normalized_z12_all = normalize_z1.unsqueeze(1) - normalize_z2.unsqueeze(0)
-            normalized_z13_all = normalize_z1.unsqueeze(1) - normalize_z3.unsqueeze(0)
-
-            if loss_type == "sparsity":
-                l1_z12_all = torch.clamp(torch.norm(normalized_z12_all, p=1, dim=-1), min=self.sqrt_hidden_size * 1e-6)
-                l2_z12_all = torch.clamp(torch.norm(normalized_z12_all, p=2, dim=-1), min=1e-6)
-                hoyer_z12 = (self.sqrt_hidden_size - l1_z12_all / l2_z12_all) / (self.sqrt_hidden_size - 1) / self.model_args.temp
-
-                l1_z13_all = torch.clamp(torch.norm(normalized_z13_all, p=1, dim=-1), min=self.sqrt_hidden_size * 1e-6)
-                l2_z13_all = torch.clamp(torch.norm(normalized_z13_all, p=2, dim=-1), min=1e-6)
-
-                weights = torch.tensor([[0.0] * i + [self.model_args.hard_negative_weight] + [0.0] * (z3.size(0) - i - 1)
-                                        for i in range(z3.size(0))]).to(self.device)
-                hoyer_z13 = (self.sqrt_hidden_size + weights - l1_z13_all / l2_z13_all) / (self.sqrt_hidden_size - 1) / self.model_args.temp
-
-                logits = torch.cat([hoyer_z12, hoyer_z13], 1)
-                loss = loss_fct(logits, labels)
-                self.custom_epoch_info["sparsity_loss"].append(loss)
-
-            elif loss_type == "sparsity-l2l1":
-                l1_z12_all = torch.clamp(torch.norm(normalized_z12_all, p=1, dim=-1), min=1e-6)
-                l2_z12_all = torch.norm(normalized_z12_all, p=2, dim=-1)
-                l2l1_z12 = l2_z12_all / l1_z12_all / self.model_args.temp
-
-                l1_z13_all = torch.clamp(torch.norm(normalized_z13_all, p=1, dim=-1), min=1e-6)
-                l2_z13_all = torch.norm(normalized_z13_all, p=2, dim=-1)
-                l2l1_z13 = l2_z13_all / l1_z13_all / self.model_args.temp
-
-                logits = torch.cat([l2l1_z12, l2l1_z13], 1)
-                loss = loss_fct(logits, labels)
-                self.custom_epoch_info["sparsity_loss"].append(loss)
-
-            elif loss_type == "sparsity-l422":
-                l4_z12_all = torch.sum(torch.pow(normalized_z12_all, 4), dim=-1)
-                l22_z12_all = torch.clamp(torch.pow(torch.sum(torch.pow(normalized_z12_all, 2), dim=-1), 2), min=1e-6)
-                l422_z12 = l4_z12_all / l22_z12_all / self.model_args.temp
-
-                l4_z13_all = torch.sum(torch.pow(normalized_z13_all, 4), dim=-1)
-                l22_z13_all = torch.clamp(torch.pow(torch.sum(torch.pow(normalized_z13_all, 2), dim=-1), 2), min=1e-6)
-                l422_z13 = l4_z13_all / l22_z13_all / self.model_args.temp
-
-                logits = torch.cat([l422_z12, l422_z13], 1)
-                loss = loss_fct(logits, labels)
-                self.custom_epoch_info["sparsity_loss"].append(loss)
-
-            cos_sim = None
 
         else:
             raise ValueError(f"Unknown loss_type={loss_type}")
@@ -933,28 +735,24 @@ class DualBertForCL(BertPreTrainedModel):
         )
 
     def forward(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        labels=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        sent_emb=False,
-        is_query: bool = True,   # only used when sent_emb=True
-        mlm_input_ids=None,
-        mlm_labels=None,
+            self,
+            input_ids=None,
+            attention_mask=None,
+            token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=None,
+            labels=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
+            sent_emb=False,
+            is_query: bool = True,  # only used when sent_emb=True
+            mlm_input_ids=None,
+            mlm_labels=None,
     ):
         if sent_emb:
             flag = "_dbg_printed_query" if is_query else "_dbg_printed_doc"
-            if not hasattr(self, flag):
-                print("[DBG] sent_emb tower =", "query_bert" if is_query else "doc_bert")
-                setattr(self, flag, True)
-
 
             encoder = self.query_bert if is_query else self.doc_bert
             return self._sentemb_forward_with(
@@ -989,4 +787,3 @@ class DualBertForCL(BertPreTrainedModel):
         if mode and getattr(self.model_args, "freeze_doc_encoder", True):
             self.doc_bert.eval()
         return self
-

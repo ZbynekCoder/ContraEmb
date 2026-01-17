@@ -1611,46 +1611,6 @@ def cl_forward(
 
             loss = loss_fct(cos_sim, labels)
             self.custom_epoch_info["cl_loss"].append(loss)
-        elif loss_type=="sparsity":
-            norm_z1 = z1 / torch.norm(z1, dim=1, keepdim=True)
-            norm_z2 = z2 / torch.norm(z2, dim=1, keepdim=True)
-            norm_z3 = z3 / torch.norm(z3, dim=1, keepdim=True)
-
-            labels = torch.arange(z1.size(0)).long().to(self.device)
-            loss_fct = nn.CrossEntropyLoss()
-
-            diff_z12 = norm_z1 - norm_z2
-            diff_z13 = norm_z1 - norm_z3
-            diff_z12_all = norm_z1.unsqueeze(1) - norm_z2.unsqueeze(0)
-            diff_z13_all = norm_z1.unsqueeze(1) - norm_z3.unsqueeze(0)
-
-            l1_z12 = torch.clamp(torch.norm(diff_z12, p=1, dim=-1), min=self.sqrt_hidden_size * 1e-6)
-            l2_z12 = torch.clamp(torch.norm(diff_z12, p=2, dim=-1), min=1e-6)
-            ratio_z12 = torch.mean(l1_z12 / l2_z12)
-
-            l1_z13 = torch.clamp(torch.norm(diff_z13, p=1, dim=-1), min=self.sqrt_hidden_size * 1e-6)
-            l2_z13 = torch.clamp(torch.norm(diff_z13, p=2, dim=-1), min=1e-6)
-            ratio_z13 = torch.mean(l1_z13 / l2_z13)
-
-            l1_all_z12 = torch.clamp(torch.norm(diff_z12_all, p=1, dim=-1), min=self.sqrt_hidden_size * 1e-6)
-            l2_all_z12 = torch.clamp(torch.norm(diff_z12_all, p=2, dim=-1), min=1e-6)
-            hoyer_z12 = (self.sqrt_hidden_size - l1_all_z12 / l2_all_z12) / (self.sqrt_hidden_size - 1) / self.model_args.temp
-
-            l1_all_z13 = torch.clamp(torch.norm(diff_z13_all, p=1, dim=-1), min=self.sqrt_hidden_size * 1e-6)
-            l2_all_z13 = torch.clamp(torch.norm(diff_z13_all, p=2, dim=-1), min=1e-6)
-            weights = torch.tensor([[0.0] * i + [self.model_args.hard_negative_weight] + [0.0] * (z3.size(0) - i - 1) for i in range(z3.size(0))]).to(self.device)
-            hoyer_z13 = (self.sqrt_hidden_size + weights - l1_all_z13 / l2_all_z13) / (self.sqrt_hidden_size - 1) / self.model_args.temp
-
-            hoyer_sim = torch.cat([hoyer_z12, hoyer_z13], 1)
-            sparsity_loss = loss_fct(hoyer_sim, labels)
-
-            self.custom_epoch_info["sparsity_loss"].append(sparsity_loss)
-            self.custom_epoch_info["l1l2_ratio_z12"].append(ratio_z12)
-            self.custom_epoch_info["l1l2_ratio_z13"].append(ratio_z13)
-            self.custom_epoch_info["l1l2_ratio_z13_all"].append(torch.mean(l1_all_z13 / l2_all_z13))
-
-            cos_sim = hoyer_sim
-            loss = sparsity_loss
 
         if not return_dict:
             output = (cos_sim,) + encoder_outputs[2:]
@@ -1797,11 +1757,10 @@ class NewModelForCL(NewPreTrainedModel):
         self.sqrt_hidden_size=math.sqrt(self.hidden_size)
         self.current_training_progress=0
         self.sim = Similarity(temp=self.model_args.temp)
-        self.custom_epoch_info={    "loss":[],"cl_loss": [], "sparsity_loss":[],
-                                    "l1l2_ratio_z12":[],"l1l2_ratio_z13":[],"l1l2_ratio_z13_all":[],
-                                    "l2l1_ratio_z12":[],"l2l1_ratio_z13":[],"l2l1_ratio_z13_all":[],
-                                    "l422_ratio_z12":[],"l422_ratio_z13":[],"l422_ratio_z13_all":[],
-                                }
+        self.custom_epoch_info={    
+            "loss":[],
+            "cl_loss": [], 
+        }
 
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings

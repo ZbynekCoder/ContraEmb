@@ -6,7 +6,6 @@ export CUDA_VISIBLE_DEVICES=1
 TS=$(date +"%Y%m%d-%H%M%S")
 TRAIN_DIR=results/arguana/dual_tower/lr5e-5_ep3_temp0.02_hnw0.0/20260106-183042
 
-TS=$(date +"%Y%m%d-%H%M%S")
 OUT_DIR=test_results/arguana_dual/dev/${TS}
 mkdir -p ${OUT_DIR}
 
