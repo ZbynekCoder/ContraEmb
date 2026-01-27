@@ -226,7 +226,7 @@ def cl_init(cls, config):
     cls.hidden_size = config.hidden_size
     cls.sqrt_hidden_size = math.sqrt(cls.hidden_size)
     cls.current_training_progress = 0
-    print(cls.hidden_size, cls.sqrt_hidden_size)
+    print(f"cls.hidden_size: {cls.hidden_size}, cls.sqrt_hidden_size: {cls.sqrt_hidden_size}")
 
     # ====== Query-side learnable transform T (only affects anchor/query z1) ======
     cls.use_query_transform = getattr(cls.model_args, "use_query_transform", False)
@@ -234,11 +234,53 @@ def cl_init(cls, config):
         cls.query_transform_dropout = nn.Dropout(getattr(cls.model_args, "query_transform_dropout", 0.1))
         cls.query_transform_scale = float(getattr(cls.model_args, "query_transform_scale", 1.0))
 
-        cls.query_transform = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+        # Upgrade: linear / mlp / gated_mlp (default)
+        hidden = config.hidden_size
+        mlp_ratio = float(getattr(cls.model_args, "query_transform_mlp_ratio", 0.25))  # 0.25/0.5/1.0
+        mid = max(1, int(hidden * mlp_ratio))
 
-        # Init for stability
-        init_std = float(getattr(cls.model_args, "query_transform_init_std", 0.02))
-        nn.init.normal_(cls.query_transform.weight, mean=0.0, std=init_std)
+        qt_type = str(getattr(cls.model_args, "query_transform_type", "gated_mlp")).lower()
+
+        class _QueryMLP(nn.Module):
+            def __init__(self, hidden_size: int, mid_size: int, gated: bool):
+                super().__init__()
+                self.gated = gated
+                self.fc1 = nn.Linear(hidden_size, mid_size, bias=True)
+                self.fc2 = nn.Linear(mid_size, hidden_size, bias=False)
+                if gated:
+                    self.gate = nn.Linear(hidden_size, mid_size, bias=True)
+                self.act = nn.GELU()
+
+                # init for stability
+                init_std = float(getattr(cls.model_args, "query_transform_init_std", 0.02))
+                nn.init.normal_(self.fc1.weight, mean=0.0, std=init_std)
+                nn.init.zeros_(self.fc1.bias)
+
+                if gated:
+                    nn.init.normal_(self.gate.weight, mean=0.0, std=init_std)
+                    nn.init.zeros_(self.gate.bias)
+
+                # key trick: start near-identity (delta≈0 at start)
+                nn.init.zeros_(self.fc2.weight)
+
+            def forward(self, z: torch.Tensor) -> torch.Tensor:
+                h = self.act(self.fc1(z))
+                if self.gated:
+                    g = torch.sigmoid(self.gate(z))
+                    h = h * g
+                return self.fc2(h)
+
+        if qt_type in ["linear", "lin"]:
+            cls.query_transform = nn.Linear(hidden, hidden, bias=False)
+            init_std = float(getattr(cls.model_args, "query_transform_init_std", 0.02))
+            nn.init.normal_(cls.query_transform.weight, mean=0.0, std=init_std)
+
+        elif qt_type in ["mlp", "fcn"]:
+            cls.query_transform = _QueryMLP(hidden, mid, gated=False)
+
+        else:
+            # default: gated_mlp
+            cls.query_transform = _QueryMLP(hidden, mid, gated=True)
     # ====== End query transform ======
 
 

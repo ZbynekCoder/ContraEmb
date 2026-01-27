@@ -131,6 +131,14 @@ class ModelArguments:
         default=False,
         metadata={"help": "If True, freeze the encoder backbone and only train query-side modules (e.g., query_transform)."}
     )
+    query_transform_type: str = field(
+        default="gated_mlp",
+        metadata={"help": "Query transform type: linear | mlp | gated_mlp"}
+    )
+    query_transform_mlp_ratio: float = field(
+        default=0.25,
+        metadata={"help": "Hidden ratio for query transform MLP (e.g., 0.25 / 0.5 / 1.0)"}
+    )
     # ====== END ADD ======
 
     # ====== Route C: asymmetric dual-encoder ======

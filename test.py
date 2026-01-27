@@ -1,4 +1,3 @@
-# test_contradiction_faiss_final.py
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "True"
 
@@ -220,11 +219,11 @@ def _load_encoder(args: ModelArguments):
 
 @torch.no_grad()
 def _encode_texts(
-    args: ModelArguments,
-    texts: List[str],
-    is_query: bool,
-    model,
-    tokenizer,
+        args: ModelArguments,
+        texts: List[str],
+        is_query: bool,
+        model,
+        tokenizer,
 ) -> torch.Tensor:
     """
     Returns L2-normalized embeddings on CPU float32: (N, dim).
@@ -284,10 +283,10 @@ def _encode_texts(
 
 
 def _build_or_load_index(
-    doc_np: np.ndarray,
-    dim: int,
-    index_file: str,
-    overwrite: bool = False,
+        doc_np: np.ndarray,
+        dim: int,
+        index_file: str,
+        overwrite: bool = False,
 ) -> faiss.Index:
     """
     Use HNSW inner product index (cosine for normalized vectors).
