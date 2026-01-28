@@ -61,6 +61,9 @@ class ModelArguments:
     query_transform_dropout: float = field(default=0.1)
     query_transform_init_std: float = field(default=0.02)
 
+    query_transform_type: str = field(default="gated_mlp")      # "linear" | "mlp" | "gated_mlp"
+    query_transform_mlp_ratio: float = field(default=0.25)      # only used for mlp/gated_mlp
+
     # ===== compatibility fields (IMPORTANT) =====
     # your our_BertForCL __init__ reads these from model_args
     do_mlm: bool = field(default=False)
@@ -310,7 +313,7 @@ def main():
 
     # output files
     os.makedirs(eval_args.write_path, exist_ok=True)
-    out_path = os.path.join(eval_args.write_path, f"{eval_args.dataset_name}_{eval_args.split}_cos_only.txt")
+    out_path = os.path.join(eval_args.write_path, f"{eval_args.dataset_name}_{eval_args.split}_result.txt")
     with open(out_path, "w", encoding="utf-8") as out_f:
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] dataset={eval_args.dataset_name} split={eval_args.split}", file=out_f)
         logger.info("dataset=%s split=%s", eval_args.dataset_name, eval_args.split)

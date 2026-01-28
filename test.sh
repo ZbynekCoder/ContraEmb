@@ -3,16 +3,17 @@ set -e
 
 export CUDA_VISIBLE_DEVICES=1
 
-MODEL_DIR=results/arguana/bge/gated_mlp/lr5e-5_ep3_fbFalse_hnw0.0_temp0.02/20260120-222621
+MODEL_DIR=results/arguana/bge/linear/lr5e-5_ep3_fbFalse_hnw0.0_temp0.02/20260119-185727
 
 echo "$MODEL_DIR"
 
 MODEL="bge"
-TEST_TYPE="test"
 DATASET="arguana"
+TEST_TYPE="test"
+QUERY_TRANSFORM_ON=True
+QUERY_TRANSFORM_TYPE="linear"
 
-TS=$(date +"%Y%m%d-%H%M%S")
-OUT_DIR=test_results/${DATASET}_cos_only/${TEST_TYPE}/${TS}
+OUT_DIR=${MODEL_DIR}/${TEST_TYPE}/${DATASET}/use_query_transform_${QUERY_TRANSFORM_ON}
 
 mkdir -p ${OUT_DIR}
 
@@ -26,8 +27,9 @@ python test.py \
   --max_seq_length 512 \
   --batch_size 64 \
   --k_neighbors 1000 \
-  --use_query_transform True \
+  --use_query_transform ${QUERY_TRANSFORM_ON} \
   --query_transform_scale 1.0 \
+  --query_transform_type ${QUERY_TRANSFORM_TYPE} \
   2>&1 | tee ${OUT_DIR}/${TEST_TYPE}_eval.txt
 
 cp ${OUT_DIR}/${TEST_TYPE}_eval.txt \
