@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 
 from typing import Optional, List, Dict
-from sparsecl.models import our_BertForCL
+from model.models import our_BertForCL
 from multiprocessing import Pool
 import random
 from datetime import datetime
@@ -266,7 +266,7 @@ def sentence_embedding(model_name,input_texts,model_path=None):
         print("model path", model_path)
 
         tokenizer = AutoTokenizer.from_pretrained(model_path,trust_remote_code=True)
-        from sparsecl.gte.modeling import NewModelForCL
+        from model.gte.modeling import NewModelForCL
         model = NewModelForCL.from_pretrained(
                 model_path,
                 model_args=model_args[0],

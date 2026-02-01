@@ -23,7 +23,7 @@ from transformers.trainer_utils import (
     PredictionOutput,
     TrainOutput,
     default_compute_objective,
-    #default_hp_space,
+    # default_hp_space,
     set_seed,
     speed_metrics,
 )
@@ -74,7 +74,7 @@ if version.parse(torch.__version__) >= version.parse("1.6"):
 if is_datasets_available():
     import datasets
 
-#from transformers.trainer import _model_unwrap
+# from transformers.trainer import _model_unwrap
 from transformers.optimization import Adafactor, AdamW, get_scheduler
 import copy
 
@@ -84,41 +84,113 @@ from filelock import FileLock
 
 logger = logging.get_logger(__name__)
 
+
 class CLTrainer(Trainer):
 
     def check_overlapping(self, batch, original_batch):
-        i=1
-        input_ids=batch["input_ids"]
-        while i<input_ids.shape[0]:
-            # prefix = input_ids[:i].view(-1, 1, input_ids.size(-1))
-            # current_line = input_ids[i].view(1, -1, input_ids.size(-1))
-            prefix = input_ids[:i].reshape(-1, input_ids.size(-1))
-            current_postive = input_ids[i][1]
-            if torch.all(prefix==current_postive,dim=-1).any():
-                batch_id=random.randint(0, len(original_batch)-1)
-                data_id=random.randint(0, original_batch[batch_id]["input_ids"].size(0)-1)
-                # print(batch_id,original_batch[batch_id]["input_ids"].size(0), data_id)
-                for key in batch:
-                    batch[key][i]=original_batch[batch_id][key][data_id]
+        """
+        Prevent overlap of positives (gold) within a batch by replacing samples.
+        This version supports variable #sentences (variable hard negatives) by
+        padding/truncating the sampled replacement to match current batch shapes.
+        """
+        input_ids = batch["input_ids"]  # (bs, max_num_sent, L)
+        bs, tgt_num_sent, L = input_ids.shape
+
+        pad_id = getattr(getattr(self.model, "config", None), "pad_token_id", 0)
+
+        def _aligned_copy(dst, src, key: str):
+            """
+            Copy src -> dst with shape alignment on dim0 (num_sent) and dim1 (seq_len).
+            dst: (tgt_num_sent, L) or (tgt_hard, ...) for hard_mask
+            src: (src_num_sent, L) ...
+            """
+            if not torch.is_tensor(dst) or not torch.is_tensor(src):
+                return
+
+            # handle hard_mask separately
+            if key == "hard_mask":
+                # dst: (tgt_max_hard,), src: (src_max_hard,)
+                tgt_h = dst.size(0)
+                src_h = src.size(0)
+                m = min(tgt_h, src_h)
+                dst.zero_()
+                if m > 0:
+                    dst[:m] = src[:m]
+                return
+
+            # Typical 2D per-sample tensors: (num_sent, L)
+            if dst.ndim == 2 and src.ndim == 2:
+                tgt0, tgt1 = dst.size(0), dst.size(1)
+                src0, src1 = src.size(0), src.size(1)
+                m0, m1 = min(tgt0, src0), min(tgt1, src1)
+
+                # default fill values by key
+                if key == "input_ids":
+                    fill = pad_id
+                elif key == "attention_mask":
+                    fill = 0
+                elif key == "token_type_ids":
+                    fill = 0
+                elif key == "mlm_labels":
+                    fill = -100
+                else:
+                    fill = 0
+
+                dst.fill_(fill)
+                if m0 > 0 and m1 > 0:
+                    dst[:m0, :m1] = src[:m0, :m1]
+                return
+
+            # 1D per-sample tensors (rare)
+            if dst.ndim == 1 and src.ndim == 1:
+                m = min(dst.size(0), src.size(0))
+                dst.zero_()
+                if m > 0:
+                    dst[:m] = src[:m]
+                return
+
+            # Otherwise: fallback do nothing
+            return
+
+        i = 1
+        while i < bs:
+            # flatten previous samples' sentences as candidates
+            prefix = input_ids[:i].reshape(-1, L)  # ((i*tgt_num_sent), L)
+            current_positive = input_ids[i][1]  # (L,)
+
+            # if current positive appears in prefix, replace this sample
+            if torch.all(prefix == current_positive, dim=-1).any():
+                # sample a replacement from original_batch
+                batch_id = random.randint(0, len(original_batch) - 1)
+                data_id = random.randint(0, original_batch[batch_id]["input_ids"].size(0) - 1)
+
+                for key in batch.keys():
+                    # only align-copy tensor fields; ignore non-tensors
+                    if key not in original_batch[batch_id]:
+                        continue
+                    dst = batch[key][i]
+                    src = original_batch[batch_id][key][data_id]
+                    _aligned_copy(dst, src, key)
+                # do NOT increment i to re-check the replaced sample
             else:
-                i+=1
+                i += 1
 
     def evaluate(
-        self,
-        eval_dataset: Optional[Dataset] = None,
-        ignore_keys: Optional[List[str]] = None,
-        metric_key_prefix: str = "eval",
-        eval_senteval_transfer: bool = False,
+            self,
+            eval_dataset: Optional[Dataset] = None,
+            ignore_keys: Optional[List[str]] = None,
+            metric_key_prefix: str = "eval",
+            eval_senteval_transfer: bool = False,
     ) -> Dict[str, float]:
 
         eval_dataloader = self.get_eval_dataloader()
         self.model.eval()
-        loss=[]
+        loss = []
         with torch.no_grad():
             for batch in eval_dataloader:
-                output=self.model(**batch, output_hidden_states=True, return_dict=True, sent_emb=False)
+                output = self.model(**batch, output_hidden_states=True, return_dict=True, sent_emb=False)
                 loss.append(output.loss)
-        avg_loss=sum(loss)/len(loss)
+        avg_loss = sum(loss) / len(loss)
         return avg_loss
 
     def _save_checkpoint(self, model, trial, metrics=None):
@@ -130,7 +202,7 @@ class CLTrainer(Trainer):
         # In all cases, including ddp/dp/deepspeed, self.model is always a reference to the model we
         # want to save.
 
-        #assert _model_unwrap(model) is self.model, "internal model should be a reference to self.model"
+        # assert _model_unwrap(model) is self.model, "internal model should be a reference to self.model"
 
         # Determine the new best metric / best model checkpoint
         if metrics is not None and self.args.metric_for_best_model is not None:
@@ -141,9 +213,9 @@ class CLTrainer(Trainer):
 
             operator = np.greater if self.args.greater_is_better else np.less
             if (
-                self.state.best_metric is None
-                or self.state.best_model_checkpoint is None
-                or operator(metric_value, self.state.best_metric)
+                    self.state.best_metric is None
+                    or self.state.best_model_checkpoint is None
+                    or operator(metric_value, self.state.best_metric)
             ):
                 output_dir = self.args.output_dir
                 self.state.best_metric = metric_value
@@ -199,7 +271,7 @@ class CLTrainer(Trainer):
             # Save optimizer and scheduler
             # if self.sharded_ddp:
             # if self.sharded_dpp:
-                # self.optimizer.consolidate_state_dict()
+            # self.optimizer.consolidate_state_dict()
 
             if is_torch_tpu_available():
                 xm.rendezvous("saving_optimizer_states")
@@ -213,7 +285,6 @@ class CLTrainer(Trainer):
                 with warnings.catch_warnings(record=True) as caught_warnings:
                     torch.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
                 reissue_pt_warnings(caught_warnings)
-
 
             # Save the Trainer state
             if self.is_world_process_zero():
@@ -324,8 +395,8 @@ class CLTrainer(Trainer):
         #             else True
         #         ),
         #     )
-            # find_unused_parameters breaks checkpointing as per
-            # https://github.com/huggingface/transformers/pull/4659#issuecomment-643356021
+        # find_unused_parameters breaks checkpointing as per
+        # https://github.com/huggingface/transformers/pull/4659#issuecomment-643356021
 
         # for the rest of this function `model` is the outside model, whether it was wrapped or not
         if model is not self.model:
@@ -340,9 +411,9 @@ class CLTrainer(Trainer):
             total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
         else:
             total_train_batch_size = (
-                self.args.train_batch_size
-                * self.args.gradient_accumulation_steps
-                * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
+                    self.args.train_batch_size
+                    * self.args.gradient_accumulation_steps
+                    * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
             )
 
         num_examples = (
@@ -432,10 +503,10 @@ class CLTrainer(Trainer):
 
             assert train_dataset_is_sized, "currently we only support sized dataloader!"
 
-            total_training_step=len(epoch_iterator)*num_train_epochs
+            total_training_step = len(epoch_iterator) * num_train_epochs
 
-            if len(epoch_iterator)<1000:
-                original_batch=[]
+            if len(epoch_iterator) < 1000:
+                original_batch = []
                 for inputs in epoch_iterator:
                     original_batch.append(inputs)
 
@@ -443,17 +514,17 @@ class CLTrainer(Trainer):
             last_inputs = None
             # omitted_batch=0
             for step, inputs in enumerate(epoch_iterator):
-                
+
                 # reassigning batches so that identical sentences don't appear in the same batch as negative examples
-                if len(epoch_iterator)<1000:
-                    self.check_overlapping(inputs,original_batch)
+                if len(epoch_iterator) < 1000:
+                    self.check_overlapping(inputs, original_batch)
 
                 # Skip past any already trained steps if resuming training
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
                     continue
 
-                model.current_training_progress=(epoch*len(epoch_iterator)+step)/total_training_step
+                model.current_training_progress = (epoch * len(epoch_iterator) + step) / total_training_step
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(self.args, self.state, self.control)
@@ -467,9 +538,9 @@ class CLTrainer(Trainer):
                 self._total_flos += self.floating_point_ops(inputs)
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
-                    # last step in epoch but step is always smaller than gradient_accumulation_steps
-                    steps_in_epoch <= self.args.gradient_accumulation_steps
-                    and (step + 1) == steps_in_epoch
+                        # last step in epoch but step is always smaller than gradient_accumulation_steps
+                        steps_in_epoch <= self.args.gradient_accumulation_steps
+                        and (step + 1) == steps_in_epoch
                 ):
                     # Gradient clipping
                     if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0 and not self.deepspeed:
@@ -503,18 +574,25 @@ class CLTrainer(Trainer):
                     model.zero_grad()
 
                     self.state.global_step += 1
+
+                    if self.state.global_step % 1 == 0 and self.is_world_process_zero():
+                        # 当前 accumulation 结束后的瞬时 loss（注意：tr_loss 是累计张量）
+                        cur_loss = (tr_loss.item() - self._total_loss_scalar) / max(1, (
+                                    self.state.global_step - self._globalstep_last_logged))
+                        print(f"[step {self.state.global_step}] loss={cur_loss:.6f}")
+
                     self.state.epoch = epoch + (step + 1) / steps_in_epoch
 
                     self.control = self.callback_handler.on_step_end(self.args, self.state, self.control)
 
-                    self.control.should_save=False
+                    self.control.should_save = False
 
                     # self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
                     # self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval=[])
 
-                if step%(len(epoch_iterator)//3)==0 and step>0:
+                if step % (len(epoch_iterator) // 3) == 0 and step > 0:
 
-                    avg_custom_epoch_info={}
+                    avg_custom_epoch_info = {}
                     actual_model = model.module if hasattr(model, 'module') else model
 
                     for key, value in actual_model.custom_epoch_info.items():
@@ -543,17 +621,17 @@ class CLTrainer(Trainer):
                     # Log the calculated information
                     with open(os.path.join(self.args.output_dir, "custom_info"), "a") as custom_info_file:
                         print(f"epoch={epoch} step={step} progress={round(model.current_training_progress, 3)}",
-                            "eval info", eval_avg_custom_epoch_info, "train info", avg_custom_epoch_info, file=custom_info_file)
+                              "eval info", eval_avg_custom_epoch_info, "train info", avg_custom_epoch_info,
+                              file=custom_info_file)
 
                 if self.control.should_epoch_stop or self.control.should_training_stop:
                     break
 
-
-            #avg_custom_epoch_info= {key: (sum(value) / len(value)).item() if len(value)>0 else 0 for key, value in model.custom_epoch_info.items()}
+            # avg_custom_epoch_info= {key: (sum(value) / len(value)).item() if len(value)>0 else 0 for key, value in model.custom_epoch_info.items()}
 
             self.control = self.callback_handler.on_epoch_end(self.args, self.state, self.control)
 
-            self.control.should_save=True
+            self.control.should_save = True
 
             # self._maybe_log_save_evaluate(tr_loss, model, trial, epoch)
             self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval=[])

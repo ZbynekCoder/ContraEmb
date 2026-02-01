@@ -21,9 +21,9 @@ from beir.retrieval.search.dense import DenseRetrievalExactSearch as DRES
 from beir.retrieval import models
 
 # These are needed to load your trained checkpoint (our_BertForCL / our_gte)
-from sparsecl.models import our_BertForCL, DualBertForCL
+from model.models import our_BertForCL, DualBertForCL
 try:
-    from sparsecl.gte.modeling import NewModelForCL
+    from model.gte.modeling import NewModelForCL
 except Exception:
     NewModelForCL = None
 

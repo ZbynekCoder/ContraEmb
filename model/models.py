@@ -298,6 +298,7 @@ def our_cl_forward(cls,
                    return_dict=None,
                    mlm_input_ids=None,
                    mlm_labels=None,
+                   hard_mask=None,
                    ):
     return_dict = return_dict if return_dict is not None else cls.config.use_return_dict
     ori_input_ids = input_ids
@@ -397,7 +398,104 @@ def our_cl_forward(cls,
 
     # print(loss_type)
 
-    if loss_type == "cos":
+    if loss_type == "decouple":
+        # =========================
+        # Decoupled training:
+        #   - Semantic loss L_E: positives = {d+} ∪ hard negatives; negatives = all other docs in batch
+        #   - Stance loss  L_T:   distinguish d+ vs hard negatives using a query-side transform T,
+        #                        with gradients blocked from T branch into encoder E (stopgrad).
+        # Inputs:
+        #   input_ids:   (bs, num_sent, L) where sentence0=q, sentence1=d+, sentence2..=hard negs (padded)
+        #   hard_mask:   (bs, max_hard) bool mask for valid hard negatives (positions 2..)
+        # =========================
+        bs = batch_size
+        # split embeddings
+        zq = pooler_output[:, 0]                 # (bs, h)
+        zpos = pooler_output[:, 1]               # (bs, h)
+        zhard = pooler_output[:, 2:] if num_sent > 2 else None   # (bs, max_hard, h)
+
+        # -------- Semantic loss L_E (updates E) --------
+        tau_E = float(getattr(cls.model_args, "tau_E", None) or cls.model_args.temp)
+        # docs_all = [all positives] + [all hard negatives (padded entries masked out)]
+        docs_pos = zpos  # (bs, h)
+        if zhard is not None:
+            max_hard = zhard.size(1)
+            if hard_mask is None:
+                # if not provided, assume all are valid
+                hard_mask = torch.ones((bs, max_hard), dtype=torch.bool, device=zq.device)
+            else:
+                hard_mask = hard_mask.to(zq.device)
+            docs_hard_flat = zhard.reshape(bs * max_hard, -1)  # (bs*max_hard, h)
+            hard_valid_flat = hard_mask.reshape(bs * max_hard)  # (bs*max_hard,)
+        else:
+            max_hard = 0
+            hard_mask = torch.zeros((bs, 0), dtype=torch.bool, device=zq.device)
+            docs_hard_flat = zq.new_zeros((0, zq.size(-1)))
+            hard_valid_flat = torch.zeros((0,), dtype=torch.bool, device=zq.device)
+
+        docs_all = torch.cat([docs_pos, docs_hard_flat], dim=0)  # (Ndocs, h)
+        doc_valid = torch.cat([torch.ones((bs,), dtype=torch.bool, device=zq.device), hard_valid_flat], dim=0)  # (Ndocs,)
+
+        # logits: (bs, Ndocs)
+        logits = nn.CosineSimilarity(dim=-1)(zq.unsqueeze(1), docs_all.unsqueeze(0)) / tau_E
+
+        # positive mask: each query i has positives at:
+        #   - its own positive doc at index i
+        #   - its own valid hard negatives at indices bs + i*max_hard + j
+        pos_mask = torch.zeros_like(logits, dtype=torch.bool)  # (bs, Ndocs)
+        ar = torch.arange(bs, device=zq.device)
+        pos_mask[ar, ar] = True
+        if max_hard > 0:
+            base = bs + ar.unsqueeze(1) * max_hard  # (bs,1)
+            j = torch.arange(max_hard, device=zq.device).unsqueeze(0)  # (1,max_hard)
+            hard_indices = base + j  # (bs,max_hard)
+            # apply hard_mask
+            pos_mask.scatter_(1, hard_indices, hard_mask)
+
+        # denom mask excludes padded hard negatives
+        denom_mask = doc_valid.unsqueeze(0).expand_as(logits)
+
+        # L_E = -(logsumexp(pos) - logsumexp(denom))
+        neg_inf = torch.finfo(logits.dtype).min
+        logits_pos = logits.masked_fill(~pos_mask, neg_inf)
+        logits_den = logits.masked_fill(~denom_mask, neg_inf)
+        lse_pos = torch.logsumexp(logits_pos, dim=1)
+        lse_den = torch.logsumexp(logits_den, dim=1)
+        loss_E = -(lse_pos - lse_den).mean()
+
+        # -------- Stance loss L_T (updates T only; stopgrad into E) --------
+        margin = float(getattr(cls.model_args, "stance_margin", 0.1))
+        beta = float(getattr(cls.model_args, "stance_beta", 10.0))
+        alpha = float(getattr(cls.model_args, "stance_alpha", 1.0))
+
+        if max_hard == 0:
+            loss_T = zq.new_zeros(())
+        else:
+            # T(z) = normalize(z + scale*Dropout(Wz)) on detached zq
+            if getattr(cls.model_args, "use_query_transform", False) and hasattr(cls, "query_transform"):
+                scale = float(getattr(cls.model_args, "query_transform_scale", 1.0))
+                zq_det = zq.detach()
+                tq = zq_det + scale * cls.query_transform_dropout(cls.query_transform(zq_det))
+                tq = F.normalize(tq, p=2, dim=-1)
+            else:
+                tq = F.normalize(zq.detach(), p=2, dim=-1)
+
+            sim_pos = nn.CosineSimilarity(dim=-1)(tq, zpos)  # (bs,)
+            sim_hard = nn.CosineSimilarity(dim=-1)(tq.unsqueeze(1), zhard)  # (bs,max_hard)
+
+            delta = sim_hard - sim_pos.unsqueeze(1)  # (bs,max_hard)
+            delta = delta.masked_fill(~hard_mask, neg_inf)
+
+            lse = torch.logsumexp(beta * (delta + margin), dim=1)  # (bs,)
+            loss_T = (1.0 / beta) * torch.log1p(torch.exp(lse)).mean()
+
+        loss = loss_E + alpha * loss_T
+        cls.custom_epoch_info["cl_loss"].append(loss)
+
+        cos_sim = logits  # keep a logits tensor for compatibility/logging
+
+
+    elif loss_type == "cos":
         cos_sim = cls.sim(z1.unsqueeze(1), z2.unsqueeze(0))
         # Hard negative
         if num_sent >= 3:
@@ -420,11 +518,20 @@ def our_cl_forward(cls,
         loss = loss_fct(cos_sim, labels)
         cls.custom_epoch_info["cl_loss"].append(loss)
 
+    else:
+        raise NotImplementedError(
+            f"Undefined loss type: {loss_type}."
+        )
+
     # Calculate loss for MLM
     if mlm_outputs is not None and mlm_labels is not None:
         mlm_labels = mlm_labels.view(-1, mlm_labels.size(-1))
         prediction_scores = cls.lm_head(mlm_outputs.last_hidden_state)
-        masked_lm_loss = loss_fct(prediction_scores.view(-1, cls.config.vocab_size), mlm_labels.view(-1))
+        masked_lm_loss = F.cross_entropy(
+            prediction_scores.view(-1, cls.config.vocab_size),
+            mlm_labels.view(-1),
+            ignore_index=-100,
+        )
         loss = loss + cls.model_args.mlm_weight * masked_lm_loss
 
     if not return_dict:
@@ -510,6 +617,7 @@ class our_BertForCL(BertPreTrainedModel):
                 sent_emb=False,
                 mlm_input_ids=None,
                 mlm_labels=None,
+                hard_mask=None,
                 ):
         if sent_emb:
             return sentemb_forward(self, self.bert,
@@ -538,6 +646,7 @@ class our_BertForCL(BertPreTrainedModel):
                                   return_dict=return_dict,
                                   mlm_input_ids=mlm_input_ids,
                                   mlm_labels=mlm_labels,
+                                  hard_mask=hard_mask,
                                   )
 
 

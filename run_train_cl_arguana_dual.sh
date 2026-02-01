@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=1
 
 LR=5e-5
 EP=3

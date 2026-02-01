@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=4
 
 LR=5e-5
-EP=10
-FB=True
-HNW=0.0
+EP=3
+FB=False
 QTD=0.1
 QTS=1.0
 QTIS=0.02
 QT_TYPE="linear"
 QT_RATIO=0.25
 
-MODEL="gte"
-DATASET="msmarco"
+LOSS_TYPE="decouple"
+
+MODEL="bge"
+DATASET="arguana"
 
 case "$MODEL" in
   bge)
@@ -38,8 +39,8 @@ echo "$MODEL_DIR"
 
 case "$DATASET" in
   arguana)
-    TRAINING_DATA="data/arguana_training_final.csv"
-    EVAL_DATA="data/arguana_validation_final.csv"
+    TRAINING_DATA="data/padded/arguana_training_aggregate.csv"
+    EVAL_DATA="data/padded/arguana_validation_aggregate.csv"
     ;;
   msmarco)
     TRAINING_DATA="data/msmarco_train_gpt4_final.csv"
@@ -57,7 +58,7 @@ esac
 echo "$DATASET"
 
 TS=$(date +"%Y%m%d-%H%M%S")
-OUT_DIR=results/${DATASET}/${MODEL}/${QT_TYPE}/lr${LR}_ep${EP}_fb${FB}_hnw${HNW}_temp${TEMP}/${TS}
+OUT_DIR=results/${LOSS_TYPE}/${DATASET}/${MODEL}/${QT_TYPE}/lr${LR}_ep${EP}_fb${FB}_temp${TEMP}/${TS}
 
 mkdir -p ${OUT_DIR}
 cp "$0" "${OUT_DIR}/run_train.sh"
@@ -68,7 +69,6 @@ Date: $(date)
 LR=${LR}
 EP=${EP}
 FreezeBackbone=${FB}
-HardNegWeight=${HNW}
 Temp=${TEMP}
 
 QueryTransform:
@@ -88,9 +88,8 @@ python -u train.py \
   --max_seq_length 256 \
   --pad_to_max_length True \
   --pooler_type avg \
-  --loss_type cos \
+  --loss_type ${LOSS_TYPE} \
   --temp ${TEMP} \
-  --hard_negative_weight ${HNW} \
   --num_train_epochs ${EP} \
   --per_device_train_batch_size 64 \
   --per_device_eval_batch_size 64 \
@@ -98,7 +97,6 @@ python -u train.py \
   --gradient_checkpointing True \
   --learning_rate ${LR} \
   --dataloader_drop_last True \
-  --fp16 \
   --logging_steps 50 \
   --save_strategy no \
   --evaluation_strategy no \

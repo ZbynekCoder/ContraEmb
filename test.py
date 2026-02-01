@@ -20,9 +20,9 @@ from beir.retrieval.search.dense import DenseRetrievalExactSearch as DRES
 from beir.retrieval import models
 
 # These are needed to load your trained checkpoint (our_BertForCL / our_gte)
-from sparsecl.models import our_BertForCL, DualBertForCL
+from model.models import our_BertForCL, DualBertForCL
 try:
-    from sparsecl.gte.modeling import NewModelForCL
+    from model.gte.modeling import NewModelForCL
 except Exception:
     NewModelForCL = None
 
@@ -219,7 +219,6 @@ def _load_encoder(args: ModelArguments):
         model = torch.nn.DataParallel(model)
     return model, tokenizer
 
-
 @torch.no_grad()
 def _encode_texts(
         args: ModelArguments,
@@ -278,6 +277,17 @@ def _encode_texts(
             if hasattr(base, "query_transform") and base.query_transform is not None:
                 scale = float(args.query_transform_scale)
                 z = z + scale * base.query_transform(z)
+
+        # 在 test.py 的 _encode_texts 里，F.normalize 之前加：
+        if not torch.isfinite(z).all():
+            bad = (~torch.isfinite(z)).any(dim=-1).nonzero(as_tuple=False).view(-1)
+            print("[NaN/Inf] batch has bad rows:", bad.tolist())
+            for i in bad.tolist()[:5]:
+                print("  bad text:", repr(batch_texts[i])[:200])
+            print("  z stats:",
+                  "min", torch.nanmin(z).item(),
+                  "max", torch.nanmax(z).item())
+            raise RuntimeError("Found NaN/Inf in embeddings")
 
         z = F.normalize(z, p=2, dim=-1)
         outs.append(z.cpu())
@@ -353,11 +363,26 @@ def main():
         index_file = os.path.join(eval_args.index_dir, f"{eval_args.dataset_name}-{idx_tag}-ip-hnsw.faiss")
 
         index = _build_or_load_index(doc_np, dim, index_file, overwrite=bool(eval_args.overwrite_index))
+
+
         index.hnsw.efSearch = max(int(eval_args.k_neighbors), 128)
+
+        print("123123")
 
         # search
         k = int(eval_args.k_neighbors)
+        print("123123")
+
+        query_np = np.ascontiguousarray(query_np, dtype=np.float32)
+        assert query_np.ndim == 2, query_np.shape
+        assert query_np.shape[1] == index.d, (query_np.shape, index.d)
+        assert np.isfinite(query_np).all(), "query has NaN/Inf"
+
+
+
         scores, neighbors = index.search(query_np, k)
+
+        print("123123")
 
         # build BEIR results dict
         results: Dict[str, Dict[str, float]] = {}
@@ -369,6 +394,8 @@ def main():
                     continue
                 res_q[doc_ids[di]] = float(scores[qi, rank])
             results[qid] = res_q
+
+        print("123123")
 
         # Evaluate with BEIR helper (model object is unused for metrics, but API needs one)
         dummy = DRES(models.SentenceBERT("BAAI/bge-base-en-v1.5"), batch_size=16)

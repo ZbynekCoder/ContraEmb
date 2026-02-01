@@ -35,10 +35,10 @@ from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 # from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
 from transformers.file_utils import cached_property,  is_torch_available, is_torch_tpu_available
-from sparsecl.models import our_BertForCL, DualBertForCL
-from sparsecl.trainers import CLTrainer
+from model.models import our_BertForCL, DualBertForCL
+from model.trainers import CLTrainer
 
-from sparsecl.gte.modeling import NewModelForCL
+from model.gte.modeling import NewModelForCL
 
 from torch.utils.data import random_split
 
@@ -103,11 +103,23 @@ class ModelArguments:
             "help": "What kind of pooler to use (cls, cls_before_pooler, avg, avg_top2, avg_first_last)."
         }
     )
-    hard_negative_weight: float = field(
-        default=0,
-        metadata={
-            "help": "The **logit** of weight for hard negatives (only effective if hard negatives are used)."
-        }
+
+    # ====== Decoupled training hyper-params ======
+    tau_E: float = field(
+        default=None,
+        metadata={"help": "Temperature for semantic loss L_E. If None, use --temp."}
+    )
+    stance_margin: float = field(
+        default=0.1,
+        metadata={"help": "Margin m for stance loss L_T."}
+    )
+    stance_beta: float = field(
+        default=10.0,
+        metadata={"help": "Scale beta for LSE-weighted stance loss L_T."}
+    )
+    stance_alpha: float = field(
+        default=1.0,
+        metadata={"help": "Weight alpha for combining L_E and L_T: L = L_E + alpha * L_T."}
     )
 
     # ====== ADD THIS INTO ModelArguments (train.py) ======
@@ -383,7 +395,23 @@ def main():
         extension = "text"
     if extension == "csv":
         # datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/", delimiter="\t" if "tsv" in data_args.train_file else ",")
-        datasets = load_dataset(extension, data_files=data_files, delimiter="\t" if "tsv" in data_args.train_file else ",")
+        from datasets import Features, Value
+        import csv
+
+        train_path = data_files["train"] if isinstance(data_files, dict) else data_files
+        with open(train_path, newline="", encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter="\t" if "tsv" in data_args.train_file else ",")
+            header = next(reader)
+
+        features = Features({col: Value("string") for col in header})
+
+        datasets = load_dataset(
+            extension,
+            data_files=data_files,
+            delimiter="\t" if "tsv" in data_args.train_file else ",",
+            features=features,
+        )
+
     else:
         datasets = load_dataset(extension, data_files=data_files, cache_dir="./data/")
 
@@ -527,80 +555,83 @@ def main():
 
     # Prepare features
     column_names = datasets["train"].column_names
-    sent2_cname = None
-    sent3_cname = None
-    if len(column_names) == 2:
-        # Pair datasets
-        sent0_cname = column_names[0]
-        sent1_cname = column_names[1]
-    elif len(column_names) == 3:
-        # Pair datasets with hard negatives
-        sent0_cname = column_names[0]
-        sent1_cname = column_names[1]
-        sent2_cname = column_names[2]
-    elif len(column_names) == 4:
-        # Pair datasets with hard negatives
-        sent0_cname = column_names[0]
-        sent1_cname = column_names[1]
-        sent2_cname = column_names[2]
-        sent3_cname = column_names[3]
-    elif len(column_names) == 1:
-        # Unsupervised datasets
+
+    # Expect at least two columns: anchor/query and positive.
+    # Additional columns (if any) are treated as hard negatives.
+    # Hard negatives can be provided either as:
+    #   (a) one or more string columns (each column is one hard negative), or
+    #   (b) a single list-of-strings column (variable number of hard negatives per example).
+    if len(column_names) == 1:
+        # Unsupervised datasets: use same column twice
         sent0_cname = column_names[0]
         sent1_cname = column_names[0]
+        hard_cnames: List[str] = []
+    elif len(column_names) >= 2:
+        sent0_cname = column_names[0]
+        sent1_cname = column_names[1]
+        hard_cnames = column_names[2:]
     else:
         raise NotImplementedError
 
+    def _as_list(x):
+        if x is None:
+            return []
+        if isinstance(x, (list, tuple)):
+            # filter None
+            return [t if t is not None else " " for t in x if t is not None]
+        # scalar (string)
+        return [x]
+
     def prepare_features(examples):
-        # padding = longest (default)
-        #   If no sentence in the batch exceed the max length, then use
-        #   the max sentence length in the batch, otherwise use the
-        #   max sentence length in the argument and truncate those that
-        #   exceed the max length.
-        # padding = max_length (when pad_to_max_length, for pressure test)
-        #   All sentences are padded/truncated to data_args.max_seq_length.
         total = len(examples[sent0_cname])
 
-        # Avoid "None" fields
+        flat_sentences: List[str] = []
+        sent_counts: List[int] = []  # per-example number of sentences = 2 + num_hard
+        num_hard_list: List[int] = []
+
+        # Build flattened sentence list: [q, d+, hard...]
         for idx in range(total):
-            if examples[sent0_cname][idx] is None:
-                examples[sent0_cname][idx] = " "
-            if examples[sent1_cname][idx] is None:
-                examples[sent1_cname][idx] = " "
+            q_text = examples[sent0_cname][idx] if examples[sent0_cname][idx] is not None else " "
+            p_text = examples[sent1_cname][idx] if examples[sent1_cname][idx] is not None else " "
 
-        sentences = examples[sent0_cname] + examples[sent1_cname]
+            hard_list: List[str] = []
+            for hc in hard_cnames:
+                hard_list.extend(_as_list(examples[hc][idx]))
 
-        # If hard negative exists
-        if sent2_cname is not None:
-            for idx in range(total):
-                if examples[sent2_cname][idx] is None:
-                    examples[sent2_cname][idx] = " "
-            sentences += examples[sent2_cname]
+            hard_list = [
+                h for h in hard_list
+                if h is not None and len(str(h).strip()) > 0
+            ]
 
-        if sent3_cname is not None:
-            for idx in range(total):
-                if examples[sent3_cname][idx] is None:
-                    examples[sent3_cname][idx] = " "
-            sentences += examples[sent3_cname]
+            flat_sentences.append(q_text)
+            flat_sentences.append(p_text)
+            for h in hard_list:
+                flat_sentences.append(h)
+
+            num_hard = len(hard_list)
+            num_hard_list.append(num_hard)
+            sent_counts.append(2 + num_hard)
 
         sent_features = tokenizer(
-            sentences,
+            flat_sentences,
             max_length=data_args.max_seq_length,
             truncation=True,
             padding="max_length" if data_args.pad_to_max_length else False,
         )
 
-        features = {}
-        if sent3_cname is not None:
+        # Re-pack back to per-example variable-length list of sentences
+        features: Dict[str, List[List[List[int]]]] = {}
+        offset = 0
+        for key in sent_features:
+            features[key] = []
+        for idx in range(total):
+            n_sent = sent_counts[idx]
             for key in sent_features:
-                features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2], sent_features[key][i+total*3]] for i in range(total)]
-        elif sent2_cname is not None:
-            for key in sent_features:
-                features[key] = [[sent_features[key][i], sent_features[key][i+total], sent_features[key][i+total*2]] for i in range(total)]
-        else:
-            for key in sent_features:
-                features[key] = [[sent_features[key][i], sent_features[key][i+total]] for i in range(total)]
+                features[key].append([sent_features[key][offset + j] for j in range(n_sent)])
+            offset += n_sent
 
+        # Store num_hard for downstream collator / loss masking
+        features["num_hard"] = num_hard_list
         return features
 
     if training_args.do_train:
@@ -635,16 +666,44 @@ def main():
         mlm_probability: float = data_args.mlm_probability
 
         def __call__(self, features: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+            # Each feature contains variable-length list of sentences:
+            #   feature["input_ids"] = [q, d+, hard1, hard2, ...]
+            # We pad the number of sentences in the batch to max_num_sent,
+            # and create a hard_mask for valid hard negatives (positions >=2).
             special_keys = ['input_ids', 'attention_mask', 'token_type_ids', 'mlm_input_ids', 'mlm_labels']
             bs = len(features)
-            if bs > 0:
-                num_sent = len(features[0]['input_ids'])
-            else:
-                return
+            if bs == 0:
+                return {}
+
+            num_sent_list = [len(f['input_ids']) for f in features]
+            max_num_sent = max(num_sent_list)
+            max_hard = max(0, max_num_sent - 2)
+
             flat_features = []
-            for feature in features:
-                for i in range(num_sent):
-                    flat_features.append({k: feature[k][i] if k in special_keys else feature[k] for k in feature})
+            hard_mask = torch.zeros((bs, max_hard), dtype=torch.bool)
+            for b, feature in enumerate(features):
+                n_sent = len(feature['input_ids'])
+                n_hard = max(0, n_sent - 2)
+
+                # mark valid hard negatives for this example
+                if n_hard > 0 and max_hard > 0:
+                    hard_mask[b, :n_hard] = True
+
+                # add existing sentences
+                for i in range(n_sent):
+                    flat_features.append({k: feature[k][i] if k in special_keys else feature.get(k) for k in feature})
+
+                # pad missing sentences with a minimal dummy sequence; tokenizer.pad will expand it
+                pad_needed = max_num_sent - n_sent
+                if pad_needed > 0:
+                    dummy = {
+                        "input_ids": [self.tokenizer.pad_token_id],
+                        "attention_mask": [0],
+                    }
+                    if "token_type_ids" in feature:
+                        dummy["token_type_ids"] = [0]
+                    for _ in range(pad_needed):
+                        flat_features.append(dummy)
 
             batch = self.tokenizer.pad(
                 flat_features,
@@ -653,11 +712,20 @@ def main():
                 pad_to_multiple_of=self.pad_to_multiple_of,
                 return_tensors="pt",
             )
+
+            # MLM auxiliary objective (optional)
             if model_args.do_mlm:
                 batch["mlm_input_ids"], batch["mlm_labels"] = self.mask_tokens(batch["input_ids"])
 
-            batch = {k: batch[k].view(bs, num_sent, -1) if k in special_keys else batch[k].view(bs, num_sent, -1)[:, 0] for k in batch}
+            # reshape back: (bs, max_num_sent, L)
+            for k in list(batch.keys()):
+                if k in special_keys:
+                    batch[k] = batch[k].view(bs, max_num_sent, -1)
 
+            # add hard_mask to batch for loss masking
+            batch["hard_mask"] = hard_mask
+
+            # normalize label field names if present
             if "label" in batch:
                 batch["labels"] = batch["label"]
                 del batch["label"]
@@ -670,12 +738,9 @@ def main():
         def mask_tokens(
             self, inputs: torch.Tensor, special_tokens_mask: Optional[torch.Tensor] = None
         ) -> Tuple[torch.Tensor, torch.Tensor]:
-            """
-            Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original.
-            """
+            """Prepare masked tokens inputs/labels for masked language modeling."""
             inputs = inputs.clone()
             labels = inputs.clone()
-            # We sample a few tokens in each sequence for MLM training (with probability `self.mlm_probability`)
             probability_matrix = torch.full(labels.shape, self.mlm_probability)
             if special_tokens_mask is None:
                 special_tokens_mask = [
@@ -687,21 +752,20 @@ def main():
 
             probability_matrix.masked_fill_(special_tokens_mask, value=0.0)
             masked_indices = torch.bernoulli(probability_matrix).bool()
-            labels[~masked_indices] = -100  # We only compute loss on masked tokens
+            labels[~masked_indices] = -100
 
-            # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
             indices_replaced = torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
             inputs[indices_replaced] = self.tokenizer.convert_tokens_to_ids(self.tokenizer.mask_token)
 
-            # 10% of the time, we replace masked input tokens with random word
             indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).bool() & masked_indices & ~indices_replaced
             random_words = torch.randint(len(self.tokenizer), labels.shape, dtype=torch.long)
             inputs[indices_random] = random_words[indices_random]
 
-            # The rest of the time (10% of the time) we keep the masked input tokens unchanged
             return inputs, labels
 
-    data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
+    # data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
+    data_collator = OurDataCollatorWithPadding(tokenizer=tokenizer, padding=True)
+
 
     trainer = CLTrainer(
         model=model,

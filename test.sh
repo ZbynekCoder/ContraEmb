@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=7
 
-MODEL_DIR=results/arguana/bge/linear/lr5e-5_ep3_fbFalse_hnw0.0_temp0.02/20260119-185727
+MODEL_DIR=results/decouple/arguana/bge/linear/lr5e-5_ep3_fbFalse_hnw0.0_temp0.02/20260129-224455
 
 echo "$MODEL_DIR"
 
@@ -17,7 +17,7 @@ OUT_DIR=${MODEL_DIR}/${TEST_TYPE}/${DATASET}/use_query_transform_${QUERY_TRANSFO
 
 mkdir -p ${OUT_DIR}
 
-python test.py \
+python -u test.py \
   --dataset_name ${DATASET} \
   --split ${TEST_TYPE} \
   --model_name_or_path ${MODEL_DIR}/model \
