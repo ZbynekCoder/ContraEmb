@@ -490,7 +490,14 @@ def our_cl_forward(cls,
             loss_T = (1.0 / beta) * torch.log1p(torch.exp(lse)).mean()
 
         loss = loss_E + alpha * loss_T
-        cls.custom_epoch_info["cl_loss"].append(loss)
+        if not hasattr(cls, "custom_epoch_info") or cls.custom_epoch_info is None:
+            cls.custom_epoch_info = {"cl_loss": [], "loss_E": [], "loss_T": []}
+        for k in ["loss_E", "loss_T"]:
+            if k not in cls.custom_epoch_info:
+                cls.custom_epoch_info[k] = []
+        cls.custom_epoch_info["cl_loss"].append(loss.detach())
+        cls.custom_epoch_info["loss_E"].append(loss_E.detach())
+        cls.custom_epoch_info["loss_T"].append(loss_T.detach())
 
         cos_sim = logits  # keep a logits tensor for compatibility/logging
 
@@ -508,7 +515,7 @@ def our_cl_forward(cls,
         # Calculate loss with hard negatives
         if num_sent == 3:
             # Note that weights are actually logits of weights
-            z3_weight = cls.model_args.hard_negative_weight
+            z3_weight = 0
             weights = torch.tensor(
                 [[0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (
                             z1_z3_cos.size(-1) - i - 1) for i in range(z1_z3_cos.size(-1))]

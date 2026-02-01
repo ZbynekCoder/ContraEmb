@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=7
+export CUDA_VISIBLE_DEVICES=1
 
-MODEL_DIR=results/decouple/arguana/bge/linear/lr5e-5_ep3_fbFalse_hnw0.0_temp0.02/20260129-224455
+MODEL_DIR=results/decouple/arguana/bge/gated_mlp/lr5e-5_ep3_fbFalse_temp0.02/20260201-191855
 
 echo "$MODEL_DIR"
 
 MODEL="bge"
 DATASET="arguana"
 TEST_TYPE="test"
-QUERY_TRANSFORM_ON=True
-QUERY_TRANSFORM_TYPE="linear"
+QUERY_TRANSFORM_ON=False
+QUERY_TRANSFORM_TYPE="gated_mlp"
 
 OUT_DIR=${MODEL_DIR}/${TEST_TYPE}/${DATASET}/use_query_transform_${QUERY_TRANSFORM_ON}
 

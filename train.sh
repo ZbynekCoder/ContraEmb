@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=1
 
-LR=5e-5
+LR=2e-5
 EP=3
 FB=False
 QTD=0.1
@@ -16,6 +16,7 @@ LOSS_TYPE="decouple"
 
 MODEL="bge"
 DATASET="arguana"
+DATASET_TYPE="isolate"
 
 case "$MODEL" in
   bge)
@@ -39,8 +40,16 @@ echo "$MODEL_DIR"
 
 case "$DATASET" in
   arguana)
-    TRAINING_DATA="data/padded/arguana_training_aggregate.csv"
-    EVAL_DATA="data/padded/arguana_validation_aggregate.csv"
+    case "$DATASET_TYPE" in
+      isolate)
+        TRAINING_DATA="data/arguana_training_final.csv"
+        EVAL_DATA="data/arguana_validation_final.csv"
+        ;;
+      aggregate)
+        TRAINING_DATA="data/padded/arguana_training_aggregate.csv"
+        EVAL_DATA="data/padded/arguana_validation_aggregate.csv"
+        ;;
+    esac
     ;;
   msmarco)
     TRAINING_DATA="data/msmarco_train_gpt4_final.csv"
@@ -58,7 +67,7 @@ esac
 echo "$DATASET"
 
 TS=$(date +"%Y%m%d-%H%M%S")
-OUT_DIR=results/${LOSS_TYPE}/${DATASET}/${MODEL}/${QT_TYPE}/lr${LR}_ep${EP}_fb${FB}_temp${TEMP}/${TS}
+OUT_DIR=results/${LOSS_TYPE}/${DATASET}/${DATASET_TYPE}/${MODEL}/${QT_TYPE}/lr${LR}_ep${EP}_fb${FB}_temp${TEMP}/${TS}
 
 mkdir -p ${OUT_DIR}
 cp "$0" "${OUT_DIR}/run_train.sh"
@@ -97,6 +106,7 @@ python -u train.py \
   --gradient_checkpointing True \
   --learning_rate ${LR} \
   --dataloader_drop_last True \
+  --fp16 \
   --logging_steps 50 \
   --save_strategy no \
   --evaluation_strategy no \
