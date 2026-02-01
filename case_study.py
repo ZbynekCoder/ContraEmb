@@ -34,9 +34,9 @@ from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, AutoConfig, HfArgumentParser
 
 # Needed to load your fine-tuned checkpoint (same as test.py)
-from sparsecl.models import our_BertForCL, DualBertForCL
+from model.models import our_BertForCL, DualBertForCL
 try:
-    from sparsecl.gte.modeling import NewModelForCL
+    from model.gte.modeling import NewModelForCL
 except Exception:
     NewModelForCL = None
 
