@@ -34,7 +34,7 @@ from transformers.tokenization_utils_base import BatchEncoding, PaddingStrategy,
 from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 # from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
-from transformers.file_utils import cached_property,  is_torch_available, is_torch_tpu_available
+from transformers.file_utils import cached_property, is_torch_available, is_torch_tpu_available
 from model.models import our_BertForCL, DualBertForCL
 from model.trainers import CLTrainer
 
@@ -45,6 +45,7 @@ from torch.utils.data import random_split
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
+
 
 @dataclass
 class ModelArguments:
@@ -57,7 +58,7 @@ class ModelArguments:
         default=None,
         metadata={
             "help": "The model checkpoint for weights initialization."
-            "Don't set if you want to train a model from scratch."
+                    "Don't set if you want to train a model from scratch."
         },
     )
     model_type: Optional[str] = field(
@@ -86,7 +87,7 @@ class ModelArguments:
         default=False,
         metadata={
             "help": "Will use the token generated when running `transformers-cli login` (necessary to use this script "
-            "with private models)."
+                    "with private models)."
         },
     )
 
@@ -102,24 +103,6 @@ class ModelArguments:
         metadata={
             "help": "What kind of pooler to use (cls, cls_before_pooler, avg, avg_top2, avg_first_last)."
         }
-    )
-
-    # ====== Decoupled training hyper-params ======
-    tau_E: float = field(
-        default=None,
-        metadata={"help": "Temperature for semantic loss L_E. If None, use --temp."}
-    )
-    stance_margin: float = field(
-        default=0.1,
-        metadata={"help": "Margin m for stance loss L_T."}
-    )
-    stance_beta: float = field(
-        default=10.0,
-        metadata={"help": "Scale beta for LSE-weighted stance loss L_T."}
-    )
-    stance_alpha: float = field(
-        default=1.0,
-        metadata={"help": "Weight alpha for combining L_E and L_T: L = L_E + alpha * L_T."}
     )
 
     # ====== ADD THIS INTO ModelArguments (train.py) ======
@@ -141,7 +124,8 @@ class ModelArguments:
     )
     freeze_backbone: bool = field(
         default=False,
-        metadata={"help": "If True, freeze the encoder backbone and only train query-side modules (e.g., query_transform)."}
+        metadata={
+            "help": "If True, freeze the encoder backbone and only train query-side modules (e.g., query_transform)."}
     )
     query_transform_type: str = field(
         default="gated_mlp",
@@ -152,6 +136,24 @@ class ModelArguments:
         metadata={"help": "Hidden ratio for query transform MLP (e.g., 0.25 / 0.5 / 1.0)"}
     )
     # ====== END ADD ======
+
+    # ====== Decoupled training hyper-params ======
+    tau_E: float = field(
+        default=None,
+        metadata={"help": "Temperature for semantic loss L_E. If None, use --temp."}
+    )
+    stance_margin: float = field(
+        default=0.1,
+        metadata={"help": "Margin m for stance loss L_T."}
+    )
+    stance_beta: float = field(
+        default=10.0,
+        metadata={"help": "Scale beta for LSE-weighted stance loss L_T."}
+    )
+    stance_alpha: float = field(
+        default=1.0,
+        metadata={"help": "Weight alpha for combining L_E and L_T: L = L_E + alpha * L_T."}
+    )
 
     # ====== Route C: asymmetric dual-encoder ======
     use_dual_encoder: bool = field(
@@ -199,7 +201,6 @@ class ModelArguments:
     )
 
 
-
 @dataclass
 class DataTrainingArguments:
     """
@@ -240,14 +241,14 @@ class DataTrainingArguments:
         default=32,
         metadata={
             "help": "The maximum total input sequence length after tokenization. Sequences longer "
-            "than this will be truncated."
+                    "than this will be truncated."
         },
     )
     pad_to_max_length: bool = field(
         default=False,
         metadata={
             "help": "Whether to pad all samples to `max_seq_length`. "
-            "If False, will pad the samples dynamically when batching to the maximum length in the batch."
+                    "If False, will pad the samples dynamically when batching to the maximum length in the batch."
         },
     )
     mlm_probability: float = field(
@@ -321,7 +322,7 @@ class OurTrainingArguments(TrainingArguments):
         if device.type == "cuda":
             torch.cuda.set_device(device)
 
-        self.distributed_state=None
+        self.distributed_state = None
 
         return device
 
@@ -344,10 +345,10 @@ def main():
     print("save steps", training_args.save_steps)
 
     if (
-        os.path.exists(training_args.output_dir)
-        and os.listdir(training_args.output_dir)
-        and training_args.do_train
-        and not training_args.overwrite_output_dir
+            os.path.exists(training_args.output_dir)
+            and os.listdir(training_args.output_dir)
+            and training_args.do_train
+            and not training_args.overwrite_output_dir
     ):
         raise ValueError(
             f"Output directory ({training_args.output_dir}) already exists and is not empty."
@@ -418,7 +419,6 @@ def main():
     # print(datasets)
     # datasets["train"] = datasets["train"].select(range(1000))
 
-
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -449,9 +449,15 @@ def main():
         "use_auth_token": True if model_args.use_auth_token else None,
     }
     if model_args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.tokenizer_name,
+            **tokenizer_kwargs,
+            trust_remote_code=True)
     elif model_args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_args.model_name_or_path,
+            **tokenizer_kwargs,
+            trust_remote_code=True)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -459,8 +465,8 @@ def main():
         )
 
     if model_args.model_name_or_path:
+        # Route C: Dual tower (BERT-like encoders only)
         if model_args.use_dual_encoder:
-            # Route C: Dual tower (BERT-like encoders only)
             if not ("our_bge" in model_args.model_name or "our_uae" in model_args.model_name):
                 raise ValueError("DualBertForCL currently supports our_bge / our_uae style checkpoints (BERT-like).")
 
@@ -483,9 +489,8 @@ def main():
                 trust_remote_code=True,
             )
             model.doc_bert.load_state_dict(doc_init.state_dict())
-
+        # ===== single-tower =====
         else:
-            # ===== your original single-tower logic =====
             if "our_bge" in model_args.model_name or "our_uae" in model_args.model_name:
                 model = our_BertForCL.from_pretrained(
                     model_args.model_name_or_path,
@@ -506,8 +511,6 @@ def main():
                 )
     else:
         raise NotImplementedError
-        logger.info("Training new model from scratch")
-        model = AutoModelForMaskedLM.from_config(config)
 
     new_n = len(tokenizer)
     old_n = getattr(model.config, "vocab_size", None)
@@ -516,27 +519,19 @@ def main():
         model.resize_token_embeddings(new_n)
 
     # ================== FREEZE POLICY ==================
+    # Route C: freeze doc tower only (default), query tower finetune
     if model_args.use_dual_encoder:
-        # Route C: freeze doc tower only (default), query tower finetune
         if model_args.freeze_doc_encoder:
             print(">>> [Route C] Freezing doc tower parameters")
             for n, p in model.doc_bert.named_parameters():
                 p.requires_grad = False
-
-        # optional: if you still want query_transform only, you can also freeze query tower
-        # (not Route C typical, but kept for flexibility)
-        # if getattr(model_args, "freeze_query_encoder", False):
-        #     for n, p in model.query_bert.named_parameters():
-        #         p.requires_grad = False
-
         # query_transform (if enabled) should remain trainable
         if getattr(model_args, "use_query_transform", False):
             for n, p in model.named_parameters():
                 if "query_transform" in n:
                     p.requires_grad = True
-
+    # Original behavior: freeze backbone (single encoder) and train only query_transform
     else:
-        # Original behavior: freeze backbone (single encoder) and train only query_transform
         if model_args.freeze_backbone:
             print(">>> Freezing backbone encoder parameters")
             for name, param in model.named_parameters():
@@ -651,8 +646,8 @@ def main():
             load_from_cache_file=not data_args.overwrite_cache,
         )
         validation_size = len(validation_dataset)
-        validation_dataset = random_split(validation_dataset, [validation_size], generator=torch.Generator().manual_seed(42))[0]
-
+        validation_dataset = \
+            random_split(validation_dataset, [validation_size], generator=torch.Generator().manual_seed(42))[0]
 
     # Data collator
     @dataclass
@@ -665,7 +660,8 @@ def main():
         mlm: bool = True
         mlm_probability: float = data_args.mlm_probability
 
-        def __call__(self, features: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        def __call__(self, features: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]) -> Dict[
+            str, torch.Tensor]:
             # Each feature contains variable-length list of sentences:
             #   feature["input_ids"] = [q, d+, hard1, hard2, ...]
             # We pad the number of sentences in the batch to max_num_sent,
@@ -736,7 +732,7 @@ def main():
             return batch
 
         def mask_tokens(
-            self, inputs: torch.Tensor, special_tokens_mask: Optional[torch.Tensor] = None
+                self, inputs: torch.Tensor, special_tokens_mask: Optional[torch.Tensor] = None
         ) -> Tuple[torch.Tensor, torch.Tensor]:
             """Prepare masked tokens inputs/labels for masked language modeling."""
             inputs = inputs.clone()
@@ -744,7 +740,8 @@ def main():
             probability_matrix = torch.full(labels.shape, self.mlm_probability)
             if special_tokens_mask is None:
                 special_tokens_mask = [
-                    self.tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()
+                    self.tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in
+                    labels.tolist()
                 ]
                 special_tokens_mask = torch.tensor(special_tokens_mask, dtype=torch.bool)
             else:
@@ -765,7 +762,6 @@ def main():
 
     # data_collator = default_data_collator if data_args.pad_to_max_length else OurDataCollatorWithPadding(tokenizer)
     data_collator = OurDataCollatorWithPadding(tokenizer=tokenizer, padding=True)
-
 
     trainer = CLTrainer(
         model=model,
@@ -804,6 +800,7 @@ def main():
         pass
 
     return results
+
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)

@@ -25,6 +25,52 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+#======================================================================
+import os
+import json
+import torch
+
+_DEBUG_NAN = os.environ.get("DEBUG_NAN", "0") == "1"
+_DEBUG_NAN_MAX_DUMPS = int(os.environ.get("DEBUG_NAN_MAX_DUMPS", "3"))
+_debug_nan_dumped = 0
+
+def _finite_check(name: str, t: torch.Tensor, extra: dict | None = None):
+    """
+    只在发现 NaN/Inf 时抛错，并（可选）dump 少量信息到 output_dir 方便复现。
+    """
+    global _debug_nan_dumped
+    if t is None:
+        return
+    if not torch.is_tensor(t):
+        return
+    if torch.isfinite(t).all():
+        return
+
+    msg = {
+        "name": name,
+        "dtype": str(t.dtype),
+        "shape": list(t.shape),
+        "min": float(torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0).min().item()) if t.numel() else None,
+        "max": float(torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0).max().item()) if t.numel() else None,
+        "nan_cnt": int(torch.isnan(t).sum().item()),
+        "inf_cnt": int(torch.isinf(t).sum().item()),
+    }
+    if extra:
+        msg.update(extra)
+
+    # 可选 dump：最多 dump N 次，避免刷屏/写爆盘
+    if _DEBUG_NAN and _debug_nan_dumped < _DEBUG_NAN_MAX_DUMPS:
+        out = os.environ.get("DEBUG_NAN_OUT", "./nan_dumps")
+        os.makedirs(out, exist_ok=True)
+        path = os.path.join(out, f"nan_{_debug_nan_dumped:02d}_{name}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(msg, f, ensure_ascii=False, indent=2)
+        _debug_nan_dumped += 1
+
+    raise FloatingPointError(f"[NaN/Inf detected] {msg}")
+#======================================================================
+
+
 class OurBertEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -194,7 +240,14 @@ class Pooler(nn.Module):
         if self.pooler_type in ['cls_before_pooler', 'cls']:
             return last_hidden[:, 0]
         elif self.pooler_type == "avg":
-            return ((last_hidden * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(-1).unsqueeze(-1))
+            # den = attention_mask.sum(-1)  # (bs,)
+            # if (den == 0).any():
+            #     idx = int((den == 0).nonzero(as_tuple=False)[0].item())
+            #     raise ValueError(
+            #         f"avg pooling division by zero: attention_mask.sum==0 at idx={idx}, "
+            #         f"pooler_type={self.pooler_type}"
+            #     )
+            return ((last_hidden * attention_mask.unsqueeze(-1)).sum(1) / attention_mask.sum(-1).unsqueeze(-1).clamp_min(1))
         elif self.pooler_type == "avg_first_last":
             first_hidden = hidden_states[1]
             last_hidden = hidden_states[-1]
@@ -344,6 +397,8 @@ def our_cl_forward(cls,
 
     # Pooling
     pooler_output = cls.pooler(attention_mask, outputs)
+    _finite_check("pooler_output_flat", pooler_output)
+
     pooler_output = pooler_output.view((batch_size, num_sent, pooler_output.size(-1)))  # (bs, num_sent, hidden)
 
     # If using "cls", we add an extra MLP layer

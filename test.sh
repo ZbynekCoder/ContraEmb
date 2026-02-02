@@ -3,7 +3,7 @@ set -e
 
 export CUDA_VISIBLE_DEVICES=1
 
-MODEL_DIR=results/decouple/arguana/bge/gated_mlp/lr5e-5_ep3_fbFalse_temp0.02/20260201-191855
+MODEL_DIR=results/decouple/arguana/aggregate/bge/linear/lr5e-6_ep20_fbTrue_temp0.02/20260202-154501
 
 echo "$MODEL_DIR"
 
@@ -11,7 +11,7 @@ MODEL="bge"
 DATASET="arguana"
 TEST_TYPE="test"
 QUERY_TRANSFORM_ON=False
-QUERY_TRANSFORM_TYPE="gated_mlp"
+QUERY_TRANSFORM_TYPE="linear"
 
 OUT_DIR=${MODEL_DIR}/${TEST_TYPE}/${DATASET}/use_query_transform_${QUERY_TRANSFORM_ON}
 
@@ -25,7 +25,7 @@ python -u test.py \
   --write_path ${OUT_DIR} \
   --pooler_type avg \
   --max_seq_length 512 \
-  --batch_size 64 \
+  --batch_size 128 \
   --k_neighbors 1000 \
   --use_query_transform ${QUERY_TRANSFORM_ON} \
   --query_transform_scale 1.0 \

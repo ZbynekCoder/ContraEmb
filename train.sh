@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=3
+export DEBUG_NAN=1
 
-LR=2e-5
-EP=3
+LR=5e-6
+EP=20
 FB=False
 QTD=0.1
 QTS=1.0
 QTIS=0.02
 QT_TYPE="linear"
 QT_RATIO=0.25
+STANCE_MARGIN=0.1
+STANCE_BETA=10.0
+STANCE_ALPHA=0.0
 
 LOSS_TYPE="decouple"
 
 MODEL="bge"
 DATASET="arguana"
-DATASET_TYPE="isolate"
+DATASET_TYPE="aggregate"
 
 case "$MODEL" in
   bge)
@@ -100,8 +104,8 @@ python -u train.py \
   --loss_type ${LOSS_TYPE} \
   --temp ${TEMP} \
   --num_train_epochs ${EP} \
-  --per_device_train_batch_size 64 \
-  --per_device_eval_batch_size 64 \
+  --per_device_train_batch_size 32 \
+  --per_device_eval_batch_size 32 \
   --gradient_accumulation_steps 1 \
   --gradient_checkpointing True \
   --learning_rate ${LR} \
@@ -117,4 +121,7 @@ python -u train.py \
   --query_transform_init_std ${QTIS} \
   --query_transform_type ${QT_TYPE} \
   --query_transform_mlp_ratio ${QT_RATIO} \
+  --stance_margin ${STANCE_MARGIN} \
+  --stance_beta ${STANCE_BETA} \
+  --stance_alpha ${STANCE_ALPHA} \
   2>&1 | tee ${OUT_DIR}/train.log
