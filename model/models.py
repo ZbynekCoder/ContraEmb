@@ -342,33 +342,32 @@ class our_BertForCL(BertPreTrainedModel):
         _finite_check("pooler_output_flat", pooled)
         pooled = pooled.view(bs, num_sent, -1)    # (bs, num_sent, H)
 
-        # split z1/z2
-        z1 = pooled[:, 0]
-        z2 = pooled[:, 1]
+        # split query/positive
+        query = pooled[:, 0]
+        positive = pooled[:, 1]
 
-        # apply query transform ONLY on z1 for training
-        z1 = self._apply_query_transform(z1)
+        # apply query transform ONLY on query for training
+        query = self._apply_query_transform(query)
 
-        # hard negatives (only for cos path's z3 gather; decouple uses pooled directly)
-        if num_sent > 2:
-            z3 = pooled[:, 2]
+        # hard negatives (only for cos path's hard_negative gather; decouple uses pooled directly)
+        hard_negative = pooled[:, 2]
 
         # distributed gather for cos loss branch (preserve original behavior)
         if dist.is_initialized() and self.training:
             if num_sent >= 3:
-                z3_list = [torch.zeros_like(z3) for _ in range(dist.get_world_size())]
-                dist.all_gather(z3_list, z3.contiguous())
-                z3_list[dist.get_rank()] = z3
-                z3 = torch.cat(z3_list, dim=0)
+                hard_negative_list = [torch.zeros_like(hard_negative) for _ in range(dist.get_world_size())]
+                dist.all_gather(hard_negative_list, hard_negative.contiguous())
+                hard_negative_list[dist.get_rank()] = hard_negative
+                hard_negative = torch.cat(hard_negative_list, dim=0)
 
-            z1_list = [torch.zeros_like(z1) for _ in range(dist.get_world_size())]
-            z2_list = [torch.zeros_like(z2) for _ in range(dist.get_world_size())]
-            dist.all_gather(z1_list, z1.contiguous())
-            dist.all_gather(z2_list, z2.contiguous())
-            z1_list[dist.get_rank()] = z1
-            z2_list[dist.get_rank()] = z2
-            z1 = torch.cat(z1_list, dim=0)
-            z2 = torch.cat(z2_list, dim=0)
+            query_list = [torch.zeros_like(query) for _ in range(dist.get_world_size())]
+            positive_list = [torch.zeros_like(positive) for _ in range(dist.get_world_size())]
+            dist.all_gather(query_list, query.contiguous())
+            dist.all_gather(positive_list, positive.contiguous())
+            query_list[dist.get_rank()] = query
+            positive_list[dist.get_rank()] = positive
+            query = torch.cat(query_list, dim=0)
+            positive = torch.cat(positive_list, dim=0)
 
         loss_type = str(getattr(self.model_args, "loss_type", "cos")).lower()
 
@@ -376,7 +375,7 @@ class our_BertForCL(BertPreTrainedModel):
         # loss: decouple
         # =========================
         if loss_type == "decouple":
-            # NOTE: keep semantics close to original: use pooled (local) not gathered z1/z2
+            # NOTE: keep semantics close to original: use pooled (local) not gathered query/positive
             zq = pooled[:, 0]       # (bs, H)
             zpos = pooled[:, 1]     # (bs, H)
             zhard = pooled[:, 2:] if num_sent > 2 else None
@@ -459,19 +458,19 @@ class our_BertForCL(BertPreTrainedModel):
         # loss: cos (InfoNCE)
         # =========================
         elif loss_type == "cos":
-            cos_sim = self.sim(z1.unsqueeze(1), z2.unsqueeze(0))
+            cos_sim = self.sim(query.unsqueeze(1), positive.unsqueeze(0))
             if num_sent >= 3:
-                z1_z3_cos = self.sim(z1.unsqueeze(1), z3.unsqueeze(0))
+                z1_z3_cos = self.sim(query.unsqueeze(1), hard_negative.unsqueeze(0))
                 cos_sim = torch.cat([cos_sim, z1_z3_cos], dim=1)
 
             labels = torch.arange(cos_sim.size(0)).long().to(self.device)
             loss_fct = nn.CrossEntropyLoss()
 
-            # keep EXACT baseline behavior: z3_weight hard-coded as 0 in original
+            # keep EXACT baseline behavior: hard_negative_weight hard-coded as 0 in original
             if num_sent == 3:
-                z3_weight = 0
+                hard_negative_weight = 0
                 weights = torch.tensor(
-                    [[0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1)) + [0.0] * i + [z3_weight] + [0.0] * (
+                    [[0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1)) + [0.0] * i + [hard_negative_weight] + [0.0] * (
                         z1_z3_cos.size(-1) - i - 1)
                      for i in range(z1_z3_cos.size(-1))]
                 ).to(self.device)

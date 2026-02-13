@@ -32,8 +32,7 @@ class CustomInfoCallback(TrainerCallback):
             with open(path, "a", encoding="utf-8") as f:
                 f.write(f"step={state.global_step} info={actual.custom_epoch_info}\n")
         except Exception:
-            # avoid crashing training due to logging
-            pass
+            raise Exception
 
         return control
 
