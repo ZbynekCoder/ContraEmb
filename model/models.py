@@ -1,23 +1,26 @@
-import os
 import json
-import math
 import logging
-from typing import Optional, Tuple, Union, Dict
+import math
+import os
+from typing import Optional, Dict
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-
+from transformers.modeling_outputs import (
+    SequenceClassifierOutput,
+    BaseModelOutputWithPoolingAndCrossAttentions,
+)
 from transformers.models.bert.modeling_bert import (
     BertPreTrainedModel,
     BertModel,
     BertLMPredictionHead,
 )
-from transformers.modeling_outputs import (
-    SequenceClassifierOutput,
-    BaseModelOutputWithPoolingAndCrossAttentions,
-)
+
+from .batching import split_retrieval_batch
+from .dist_utils import gather_concat
+from .losses import cos_infonce_loss, decouple_loss, mlm_aux_loss
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +326,7 @@ class our_BertForCL(BertPreTrainedModel):
             output_attentions=output_attentions,
         )
 
-        # optional MLM (keep same behavior as original: reuse flat_attn/flat_tti)
+        # optional MLM (reuse flat_attn/flat_tti)
         mlm_outputs = None
         if mlm_input_ids is not None:
             flat_mlm_ids = mlm_input_ids.view(-1, mlm_input_ids.size(-1))
@@ -342,143 +345,78 @@ class our_BertForCL(BertPreTrainedModel):
         _finite_check("pooler_output_flat", pooled)
         pooled = pooled.view(bs, num_sent, -1)    # (bs, num_sent, H)
 
-        # split query/positive
-        query = pooled[:, 0]
-        positive = pooled[:, 1]
+        # ---- batch organization (extracted) ----
+        batch = split_retrieval_batch(pooled, hard_mask)
+        q_raw = batch["q_raw"]
+        pos = batch["pos"]
+        hard_for_cos = batch["hard_for_cos"]      # (bs,H) or None
+        hard_all = batch["hard_all"]              # (bs,hn,H) or None
+        hard_mask = batch["hard_mask"]            # (bs,hn) or None
 
-        # apply query transform ONLY on query for training
-        query = self._apply_query_transform(query)
-
-        # hard negatives (only for cos path's hard_negative gather; decouple uses pooled directly)
-        hard_negative = pooled[:, 2]
-
-        # distributed gather for cos loss branch (preserve original behavior)
-        if dist.is_initialized() and self.training:
-            if num_sent >= 3:
-                hard_negative_list = [torch.zeros_like(hard_negative) for _ in range(dist.get_world_size())]
-                dist.all_gather(hard_negative_list, hard_negative.contiguous())
-                hard_negative_list[dist.get_rank()] = hard_negative
-                hard_negative = torch.cat(hard_negative_list, dim=0)
-
-            query_list = [torch.zeros_like(query) for _ in range(dist.get_world_size())]
-            positive_list = [torch.zeros_like(positive) for _ in range(dist.get_world_size())]
-            dist.all_gather(query_list, query.contiguous())
-            dist.all_gather(positive_list, positive.contiguous())
-            query_list[dist.get_rank()] = query
-            positive_list[dist.get_rank()] = positive
-            query = torch.cat(query_list, dim=0)
-            positive = torch.cat(positive_list, dim=0)
+        # query transform ONLY affects the cos branch's query, keep decouple semantic on raw q
+        q_cos = self._apply_query_transform(q_raw)
 
         loss_type = str(getattr(self.model_args, "loss_type", "cos")).lower()
 
-        # =========================
-        # loss: decouple
-        # =========================
-        if loss_type == "decouple":
-            # NOTE: keep semantics close to original: use pooled (local) not gathered query/positive
-            zq = pooled[:, 0]       # (bs, H)
-            zpos = pooled[:, 1]     # (bs, H)
-            zhard = pooled[:, 2:] if num_sent > 2 else None
+        # -------------------------
+        # cos branch: DDP gather (single impl; no duplicate all_gather)
+        # -------------------------
+        if loss_type == "cos":
+            # gather across ranks only once (future-proof)
+            if dist.is_available() and dist.is_initialized() and self.training:
+                if hard_for_cos is not None:
+                    hard_for_cos = gather_concat(hard_for_cos)
+                q_cos = gather_concat(q_cos)
+                pos = gather_concat(pos)
 
-            tau_E = float(getattr(self.model_args, "tau_E", None) or self.model_args.temp)
+            loss, cos_sim = cos_infonce_loss(
+                query=q_cos,
+                positive=pos,
+                hard=hard_for_cos,
+                temp=float(getattr(self.model_args, "temp", 0.05)),
+                device=self.device,
+            )
+
+            self.custom_epoch_info.setdefault("cl_loss", [])
+            self.custom_epoch_info["cl_loss"].append(loss.detach())
+
+        # -------------------------
+        # decouple branch: NO DDP gather (same semantics as your current code)
+        # -------------------------
+        elif loss_type == "decouple":
+            tau_E = getattr(self.model_args, "tau_E", None)
             margin = float(getattr(self.model_args, "stance_margin", 0.1))
             beta = float(getattr(self.model_args, "stance_beta", 10.0))
             alpha = float(getattr(self.model_args, "stance_alpha", 1.0))
 
-            if zhard is not None:
-                max_hard = zhard.size(1)
-                if hard_mask is None:
-                    hard_mask = torch.ones((bs, max_hard), dtype=torch.bool, device=zq.device)
-                else:
-                    hard_mask = hard_mask.to(zq.device)
-                docs_hard_flat = zhard.reshape(bs * max_hard, -1)
-                hard_valid_flat = hard_mask.reshape(bs * max_hard)
-            else:
-                max_hard = 0
-                hard_mask = torch.zeros((bs, 0), dtype=torch.bool, device=zq.device)
-                docs_hard_flat = zq.new_zeros((0, zq.size(-1)))
-                hard_valid_flat = torch.zeros((0,), dtype=torch.bool, device=zq.device)
+            def stance_transform(zq_det: torch.Tensor) -> torch.Tensor:
+                # same behavior: apply query_transform on detached query then normalize
+                if self.use_query_transform and self.query_transform is not None:
+                    tq = zq_det + self.query_transform_scale * self.query_transform_dropout(
+                        self.query_transform(zq_det)
+                    )
+                    return F.normalize(tq, p=2, dim=-1)
+                return F.normalize(zq_det, p=2, dim=-1)
 
-            docs_all = torch.cat([zpos, docs_hard_flat], dim=0)
-            doc_valid = torch.cat(
-                [torch.ones((bs,), dtype=torch.bool, device=zq.device), hard_valid_flat],
-                dim=0
+            loss, cos_sim, aux = decouple_loss(
+                zq=q_raw,
+                zpos=pos,
+                zhard=hard_all,
+                hard_mask=hard_mask,
+                temp=float(getattr(self.model_args, "temp", 0.05)),
+                tau_E=tau_E,
+                stance_margin=margin,
+                stance_beta=beta,
+                stance_alpha=alpha,
+                stance_query_transform=stance_transform,
             )
 
-            logits = nn.CosineSimilarity(dim=-1)(zq.unsqueeze(1), docs_all.unsqueeze(0)) / tau_E
-
-            pos_mask = torch.zeros_like(logits, dtype=torch.bool)
-            ar = torch.arange(bs, device=zq.device)
-            pos_mask[ar, ar] = True
-            if max_hard > 0:
-                base = bs + ar.unsqueeze(1) * max_hard
-                j = torch.arange(max_hard, device=zq.device).unsqueeze(0)
-                hard_indices = base + j
-                pos_mask.scatter_(1, hard_indices, hard_mask)
-
-            denom_mask = doc_valid.unsqueeze(0).expand_as(logits)
-
-            neg_inf = torch.finfo(logits.dtype).min
-            logits_pos = logits.masked_fill(~pos_mask, neg_inf)
-            logits_den = logits.masked_fill(~denom_mask, neg_inf)
-            loss_E = -(torch.logsumexp(logits_pos, dim=1) - torch.logsumexp(logits_den, dim=1)).mean()
-
-            # stance loss (updates T only; stopgrad into encoder)
-            if max_hard == 0:
-                loss_T = zq.new_zeros(())
-            else:
-                if self.use_query_transform and self.query_transform is not None:
-                    zq_det = zq.detach()
-                    tq = zq_det + self.query_transform_scale * self.query_transform_dropout(self.query_transform(zq_det))
-                    tq = F.normalize(tq, p=2, dim=-1)
-                else:
-                    tq = F.normalize(zq.detach(), p=2, dim=-1)
-
-                sim_pos = nn.CosineSimilarity(dim=-1)(tq, zpos)
-                sim_hard = nn.CosineSimilarity(dim=-1)(tq.unsqueeze(1), zhard)
-
-                delta = (sim_hard - sim_pos.unsqueeze(1)).masked_fill(~hard_mask, neg_inf)
-                lse = torch.logsumexp(beta * (delta + margin), dim=1)
-                loss_T = (1.0 / beta) * torch.log1p(torch.exp(lse)).mean()
-
-            loss = loss_E + alpha * loss_T
-
-            if self.custom_epoch_info is None:
-                self.custom_epoch_info = {}
             self.custom_epoch_info.setdefault("cl_loss", [])
             self.custom_epoch_info.setdefault("loss_E", [])
             self.custom_epoch_info.setdefault("loss_T", [])
             self.custom_epoch_info["cl_loss"].append(loss.detach())
-            self.custom_epoch_info["loss_E"].append(loss_E.detach())
-            self.custom_epoch_info["loss_T"].append(loss_T.detach())
-
-            cos_sim = logits  # keep for compatibility
-
-        # =========================
-        # loss: cos (InfoNCE)
-        # =========================
-        elif loss_type == "cos":
-            cos_sim = self.sim(query.unsqueeze(1), positive.unsqueeze(0))
-            if num_sent >= 3:
-                z1_z3_cos = self.sim(query.unsqueeze(1), hard_negative.unsqueeze(0))
-                cos_sim = torch.cat([cos_sim, z1_z3_cos], dim=1)
-
-            labels = torch.arange(cos_sim.size(0)).long().to(self.device)
-            loss_fct = nn.CrossEntropyLoss()
-
-            # keep EXACT baseline behavior: hard_negative_weight hard-coded as 0 in original
-            if num_sent == 3:
-                hard_negative_weight = 0
-                weights = torch.tensor(
-                    [[0.0] * (cos_sim.size(-1) - z1_z3_cos.size(-1)) + [0.0] * i + [hard_negative_weight] + [0.0] * (
-                        z1_z3_cos.size(-1) - i - 1)
-                     for i in range(z1_z3_cos.size(-1))]
-                ).to(self.device)
-                cos_sim = cos_sim + weights
-
-            loss = loss_fct(cos_sim, labels)
-            self.custom_epoch_info.setdefault("cl_loss", [])
-            self.custom_epoch_info["cl_loss"].append(loss.detach())
+            self.custom_epoch_info["loss_E"].append(aux["loss_E"].detach())
+            self.custom_epoch_info["loss_T"].append(aux["loss_T"].detach())
 
         else:
             raise NotImplementedError(f"Undefined loss type: {loss_type}.")
@@ -487,10 +425,10 @@ class our_BertForCL(BertPreTrainedModel):
         if mlm_outputs is not None and mlm_labels is not None:
             flat_mlm_labels = mlm_labels.view(-1, mlm_labels.size(-1))
             prediction_scores = self.lm_head(mlm_outputs.last_hidden_state)
-            masked_lm_loss = F.cross_entropy(
-                prediction_scores.view(-1, self.config.vocab_size),
-                flat_mlm_labels.view(-1),
-                ignore_index=-100,
+            masked_lm_loss = mlm_aux_loss(
+                prediction_scores=prediction_scores,
+                mlm_labels=flat_mlm_labels,
+                vocab_size=self.config.vocab_size,
             )
             loss = loss + float(getattr(self.model_args, "mlm_weight", 0.1)) * masked_lm_loss
 
