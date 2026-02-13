@@ -34,11 +34,8 @@ from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, AutoConfig, HfArgumentParser
 
 # Needed to load your fine-tuned checkpoint (same as test.py)
-from model.models import our_BertForCL, DualBertForCL
-try:
-    from model.gte.modeling import NewModelForCL
-except Exception:
-    NewModelForCL = None
+from model.models import our_BertForCL
+from model.gte.modeling import NewModelForCL
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -214,16 +211,7 @@ def _encode_texts_ours(
         base = model.module if hasattr(model, "module") else model
 
         # our_* checkpoints: use sent_emb=True to get pooler_output
-        if isinstance(base, DualBertForCL):
-            outputs = model(
-                **batch_inputs,
-                output_hidden_states=True,
-                return_dict=True,
-                sent_emb=True,
-                is_query=is_query,
-            )
-            z = outputs.pooler_output
-        elif isinstance(base, our_BertForCL) or (NewModelForCL is not None and isinstance(base, NewModelForCL)) or hasattr(base, "sentemb_forward"):
+        if isinstance(base, our_BertForCL) or (NewModelForCL is not None and isinstance(base, NewModelForCL)) or hasattr(base, "sentemb_forward"):
             outputs = model(
                 **batch_inputs,
                 output_hidden_states=True,
@@ -265,9 +253,7 @@ def _load_finetuned_model(model_args: ModelArguments, device: torch.device):
     # - GTE: NewModelForCL (if available)
     arch = (config.architectures[0] if getattr(config, "architectures", None) else "").lower()
 
-    if "dual" in arch:
-        model = DualBertForCL.from_pretrained(model_path, from_tf=bool(".ckpt" in model_path), config=config, model_args=model_args)
-    elif ("newmodelforcl" in arch) and (NewModelForCL is not None):
+    if ("newmodelforcl" in arch) and (NewModelForCL is not None):
         model = NewModelForCL.from_pretrained(model_path, from_tf=bool(".ckpt" in model_path), config=config, model_args=model_args)
     else:
         model = our_BertForCL.from_pretrained(model_path, from_tf=bool(".ckpt" in model_path), config=config, model_args=model_args)

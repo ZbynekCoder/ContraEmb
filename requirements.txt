@@ -1,5 +1,6 @@
 # --- Core Deep Learning & NLP ---
 accelerate==0.21.0
+torch
 transformers==4.36.2
 sentence-transformers==2.2.2
 datasets==2.14.4

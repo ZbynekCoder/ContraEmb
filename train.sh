@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=4
 export DEBUG_NAN=1
 
 LR=5e-6
@@ -114,7 +114,7 @@ python -u train.py \
   --logging_steps 50 \
   --save_strategy no \
   --evaluation_strategy no \
-  --use_query_transform True \
+  --use_query_transform False \
   --freeze_backbone ${FB} \
   --query_transform_dropout ${QTD} \
   --query_transform_scale ${QTS} \
