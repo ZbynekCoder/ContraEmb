@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=6
 
-MODEL_DIR=results/decouple/arguana/aggregate/bge/linear/lr5e-6_ep20_fbFalse_temp0.02/20260202-170338
+MODEL_DIR=results/decouple/arguana/isolate/bge/linear/lr5e-6_ep20_fb2_temp0.02/20260218-224858
 
 echo "$MODEL_DIR"
 

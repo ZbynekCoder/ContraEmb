@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=6
 export DEBUG_NAN=1
 
 LR=5e-6
 EP=20
-FB=False
+FB=2
+FREEZE_EMB=True
 QTD=0.1
 QTS=1.0
 QTIS=0.02
@@ -16,11 +17,11 @@ STANCE_MARGIN=0.1
 STANCE_BETA=10.0
 STANCE_ALPHA=0.0
 
-LOSS_TYPE="decouple"
+LOSS_TYPE="cos"
 
 MODEL="bge"
 DATASET="arguana"
-DATASET_TYPE="aggregate"
+DATASET_TYPE="isolate"
 
 case "$MODEL" in
   bge)
@@ -116,6 +117,7 @@ python -u train.py \
   --evaluation_strategy no \
   --use_query_transform False \
   --freeze_backbone ${FB} \
+  --freeze_embeddings ${FREEZE_EMB} \
   --query_transform_dropout ${QTD} \
   --query_transform_scale ${QTS} \
   --query_transform_init_std ${QTIS} \

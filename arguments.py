@@ -37,8 +37,36 @@ class ModelArguments:
     do_mlm: bool = field(default=False)
     mlm_weight: float = field(default=0.1)
 
-    # Freeze
-    freeze_backbone: bool = field(default=False)
+    # -------------------------
+    # Freeze policy (NEW semantics)
+    # -------------------------
+    # -1: full finetune (no freezing)
+    #  0: freeze all BERT (embeddings + encoder)
+    # >0: unfreeze last N encoder layers (default embeddings frozen unless freeze_embeddings=False)
+    freeze_backbone: int = field(
+        default=-1,
+        metadata={"help": "How many last BERT encoder layers to train. -1=all, 0=freeze all, N>0=train last N."},
+    )
+
+    # Freeze embeddings (word/position/token-type + emb LayerNorm)
+    freeze_embeddings: bool = field(
+        default=True,
+        metadata={"help": "Freeze BERT embeddings when freeze_backbone>=0. Default True."},
+    )
+
+    # LR strategy (optional, keep for future)
+    query_transform_lr: Optional[float] = field(
+        default=None,
+        metadata={"help": "LR for query_transform. Default: same as TrainingArguments.learning_rate."},
+    )
+    bert_lr: Optional[float] = field(
+        default=None,
+        metadata={"help": "LR for BERT params. Default: base_lr * bert_lr_scale."},
+    )
+    bert_lr_scale: float = field(
+        default=0.1,
+        metadata={"help": "If bert_lr is None, use base_lr * bert_lr_scale."},
+    )
 
     # Model switch (kept for compatibility)
     model_name: str = field(default="bge")  # e.g. our_gte/...
