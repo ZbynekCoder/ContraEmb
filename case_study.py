@@ -34,7 +34,7 @@ from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, AutoConfig, HfArgumentParser
 
 # Needed to load your fine-tuned checkpoint (same as test.py)
-from model.models import our_BertForCL, DualBertForCL
+from model.models import our_BertForCL
 try:
     from model.gte.modeling import NewModelForCL
 except Exception:
@@ -408,8 +408,8 @@ def main():
         if rT == -1:
             continue
 
-        topT = set(doc_ids[int(di)] for di in neigh_T[qi, :topk] if int(di) >= 0)
-        topB = set(doc_ids[int(di)] for di in neigh_B[qi, :topk] if int(di) >= 0)
+        topT = set(doc_ids[int(di)] for di in neigh_T[qi, :topk] if int(di) >= 0 and di != qi)
+        topB = set(doc_ids[int(di)] for di in neigh_B[qi, :topk] if int(di) >= 0 and di != qi)
         overlap = len(topT & topB) / float(topk)
 
         def rc(r):  # rank cost: -1 当作 topk+1

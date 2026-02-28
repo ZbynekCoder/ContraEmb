@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 
-DIR = "case_study/case_study_low_overlap"
+DIR = "case_study/case_study_T_wins"
 IN = f"{DIR}.jsonl"
 OUT = f"{DIR}.md"
 

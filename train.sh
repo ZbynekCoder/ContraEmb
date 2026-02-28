@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
 set -e
 
-export CUDA_VISIBLE_DEVICES=3
+export CUDA_VISIBLE_DEVICES=1
 export DEBUG_NAN=1
 
-LR=5e-6
-EP=20
+LR=4e-5
+EP=1
+BATCH_SIZE=128
 FB=False
-QTD=0.1
-QTS=1.0
+QT_DROPOUT=0.1
+QT_SCALE=1.0
 QTIS=0.02
 QT_TYPE="linear"
-QT_RATIO=0.25
-STANCE_MARGIN=0.1
-STANCE_BETA=10.0
-STANCE_ALPHA=0.0
 
-LOSS_TYPE="decouple"
+LOSS_TYPE="cos"
 
 MODEL="bge"
 DATASET="arguana"
-DATASET_TYPE="aggregate"
+DATASET_TYPE="isolate"
 
 case "$MODEL" in
   bge)
@@ -71,7 +68,7 @@ esac
 echo "$DATASET"
 
 TS=$(date +"%Y%m%d-%H%M%S")
-OUT_DIR=results/${LOSS_TYPE}/${DATASET}/${DATASET_TYPE}/${MODEL}/${QT_TYPE}/lr${LR}_ep${EP}_fb${FB}_temp${TEMP}/${TS}
+OUT_DIR=results/${LOSS_TYPE}/${DATASET}/${DATASET_TYPE}/${MODEL}/${QT_TYPE}/lr${LR}_ep${EP}_fb${FB}_temp${TEMP}_bs${BATCH_SIZE}_scale${QT_SCALE}_dropout${QT_DROPOUT}/${TS}
 
 mkdir -p ${OUT_DIR}
 cp "$0" "${OUT_DIR}/run_train.sh"
@@ -104,8 +101,8 @@ python -u train.py \
   --loss_type ${LOSS_TYPE} \
   --temp ${TEMP} \
   --num_train_epochs ${EP} \
-  --per_device_train_batch_size 32 \
-  --per_device_eval_batch_size 32 \
+  --per_device_train_batch_size ${BATCH_SIZE} \
+  --per_device_eval_batch_size ${BATCH_SIZE} \
   --gradient_accumulation_steps 1 \
   --gradient_checkpointing True \
   --learning_rate ${LR} \
@@ -116,12 +113,8 @@ python -u train.py \
   --evaluation_strategy no \
   --use_query_transform True \
   --freeze_backbone ${FB} \
-  --query_transform_dropout ${QTD} \
-  --query_transform_scale ${QTS} \
+  --query_transform_dropout ${QT_DROPOUT} \
+  --query_transform_scale ${QT_SCALE} \
   --query_transform_init_std ${QTIS} \
   --query_transform_type ${QT_TYPE} \
-  --query_transform_mlp_ratio ${QT_RATIO} \
-  --stance_margin ${STANCE_MARGIN} \
-  --stance_beta ${STANCE_BETA} \
-  --stance_alpha ${STANCE_ALPHA} \
   2>&1 | tee ${OUT_DIR}/train.log

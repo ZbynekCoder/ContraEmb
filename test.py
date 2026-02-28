@@ -20,7 +20,7 @@ from beir.retrieval.search.dense import DenseRetrievalExactSearch as DRES
 from beir.retrieval import models
 
 # These are needed to load your trained checkpoint (our_BertForCL / our_gte)
-from model.models import our_BertForCL, DualBertForCL
+from model.models import our_BertForCL
 try:
     from model.gte.modeling import NewModelForCL
 except Exception:
@@ -161,17 +161,6 @@ def _load_encoder(args: ModelArguments):
 
     if model_path:
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        if getattr(config, "dual_encoder", False):
-            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            model = DualBertForCL.from_pretrained(
-                model_path,
-                config=config,
-                model_args=args,
-            )
-            model = model.to(device)
-            if args.use_data_parallel and torch.cuda.device_count() > 1:
-                model = torch.nn.DataParallel(model)
-            return model, tokenizer
 
         # Heuristic: if it's a GTE-style checkpoint and NewModelForCL exists
         lower = model_path.lower()
@@ -249,14 +238,7 @@ def _encode_texts(
         base = model.module if hasattr(model, "module") else model
 
         # our_* checkpoints: use sent_emb=True to get pooler_output
-        if isinstance(base, DualBertForCL):
-            outputs = model(**batch_inputs,
-                            output_hidden_states=True,
-                            return_dict=True,
-                            sent_emb=True,
-                            is_query=is_query)
-            z = outputs.pooler_output
-        elif isinstance(base, our_BertForCL) or (NewModelForCL is not None and isinstance(base, NewModelForCL)) or hasattr(base, "sentemb_forward"):
+        if isinstance(base, our_BertForCL) or (NewModelForCL is not None and isinstance(base, NewModelForCL)) or hasattr(base, "sentemb_forward"):
             outputs = model(**batch_inputs,
                             output_hidden_states=True,
                             return_dict=True,
@@ -276,7 +258,11 @@ def _encode_texts(
         if is_query and args.use_query_transform:
             if hasattr(base, "query_transform") and base.query_transform is not None:
                 scale = float(args.query_transform_scale)
-                z = z + scale * base.query_transform(z)
+                if scale > 0:
+                    z = z + scale * base.query_transform(z)
+                else:
+                    z = -scale * base.query_transform(z)
+                z = F.normalize(z, p=2, dim=-1)
 
         # 在 test.py 的 _encode_texts 里，F.normalize 之前加：
         if not torch.isfinite(z).all():
@@ -392,7 +378,11 @@ def main():
                 di = int(neighbors[qi, rank])
                 if di < 0:
                     continue
-                res_q[doc_ids[di]] = float(scores[qi, rank])
+                pid = doc_ids[di]
+                if pid == qid:
+                    res_q[pid] = 0.0
+                    continue
+                res_q[pid] = float(scores[qi, rank])
             results[qid] = res_q
 
         print("123123")

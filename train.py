@@ -35,7 +35,7 @@ from transformers.trainer_utils import is_main_process
 from transformers.data.data_collator import DataCollatorForLanguageModeling
 # from transformers.file_utils import cached_property, torch_required, is_torch_available, is_torch_tpu_available
 from transformers.file_utils import cached_property, is_torch_available, is_torch_tpu_available
-from model.models import our_BertForCL, DualBertForCL
+from model.models import our_BertForCL
 from model.trainers import CLTrainer
 
 from model.gte.modeling import NewModelForCL
@@ -136,24 +136,6 @@ class ModelArguments:
         metadata={"help": "Hidden ratio for query transform MLP (e.g., 0.25 / 0.5 / 1.0)"}
     )
     # ====== END ADD ======
-
-    # ====== Decoupled training hyper-params ======
-    tau_E: float = field(
-        default=None,
-        metadata={"help": "Temperature for semantic loss L_E. If None, use --temp."}
-    )
-    stance_margin: float = field(
-        default=0.1,
-        metadata={"help": "Margin m for stance loss L_T."}
-    )
-    stance_beta: float = field(
-        default=10.0,
-        metadata={"help": "Scale beta for LSE-weighted stance loss L_T."}
-    )
-    stance_alpha: float = field(
-        default=1.0,
-        metadata={"help": "Weight alpha for combining L_E and L_T: L = L_E + alpha * L_T."}
-    )
 
     # ====== Route C: asymmetric dual-encoder ======
     use_dual_encoder: bool = field(
@@ -465,34 +447,8 @@ def main():
         )
 
     if model_args.model_name_or_path:
-        # Route C: Dual tower (BERT-like encoders only)
-        if model_args.use_dual_encoder:
-            if not ("our_bge" in model_args.model_name or "our_uae" in model_args.model_name):
-                raise ValueError("DualBertForCL currently supports our_bge / our_uae style checkpoints (BERT-like).")
-
-            # build dual model with same config
-            model = DualBertForCL(config, model_args=model_args)
-
-            # load query tower weights from model_name_or_path
-            query_init = BertModel.from_pretrained(
-                model_args.model_name_or_path,
-                add_pooling_layer=False,
-                trust_remote_code=True,
-            )
-            model.query_bert.load_state_dict(query_init.state_dict())
-
-            # load doc tower weights (optional separate path)
-            doc_path = model_args.doc_model_name_or_path or model_args.model_name_or_path
-            doc_init = BertModel.from_pretrained(
-                doc_path,
-                add_pooling_layer=False,
-                trust_remote_code=True,
-            )
-            model.doc_bert.load_state_dict(doc_init.state_dict())
-        # ===== single-tower =====
-        else:
-            if "our_bge" in model_args.model_name or "our_uae" in model_args.model_name:
-                model = our_BertForCL.from_pretrained(
+        if "our_bge" in model_args.model_name or "our_uae" in model_args.model_name:
+            model = our_BertForCL.from_pretrained(
                     model_args.model_name_or_path,
                     from_tf=bool(".ckpt" in model_args.model_name_or_path),
                     config=config,
@@ -501,8 +457,8 @@ def main():
                     use_auth_token=True if model_args.use_auth_token else None,
                     model_args=model_args
                 )
-            elif "our_gte" in model_args.model_name:
-                model = NewModelForCL.from_pretrained(
+        elif "our_gte" in model_args.model_name:
+            model = NewModelForCL.from_pretrained(
                     model_args.model_name_or_path,
                     model_args=model_args,
                     config=config,
@@ -519,27 +475,15 @@ def main():
         model.resize_token_embeddings(new_n)
 
     # ================== FREEZE POLICY ==================
-    # Route C: freeze doc tower only (default), query tower finetune
-    if model_args.use_dual_encoder:
-        if model_args.freeze_doc_encoder:
-            print(">>> [Route C] Freezing doc tower parameters")
-            for n, p in model.doc_bert.named_parameters():
-                p.requires_grad = False
-        # query_transform (if enabled) should remain trainable
-        if getattr(model_args, "use_query_transform", False):
-            for n, p in model.named_parameters():
-                if "query_transform" in n:
-                    p.requires_grad = True
-    # Original behavior: freeze backbone (single encoder) and train only query_transform
-    else:
-        if model_args.freeze_backbone:
-            print(">>> Freezing backbone encoder parameters")
-            for name, param in model.named_parameters():
-                param.requires_grad = False
-                if "query_transform" in name:
-                    param.requires_grad = True
-                if "pooler" in name:
-                    param.requires_grad = True
+    if model_args.freeze_backbone:
+        print(">>> Freezing backbone encoder parameters")
+        for name, param in model.named_parameters():
+            param.requires_grad = False
+            if "query_transform" in name:
+                param.requires_grad = True
+            if "pooler" in name:
+                param.requires_grad = True
+        
 
     # sanity check：print trainables
     trainable = [n for n, p in model.named_parameters() if p.requires_grad]
