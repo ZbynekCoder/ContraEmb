@@ -368,8 +368,6 @@ def main():
 
         scores, neighbors = index.search(query_np, k)
 
-        print("123123")
-
         # build BEIR results dict
         results: Dict[str, Dict[str, float]] = {}
         for qi, qid in enumerate(query_ids):
@@ -384,8 +382,6 @@ def main():
                     continue
                 res_q[pid] = float(scores[qi, rank])
             results[qid] = res_q
-
-        print("123123")
 
         # Evaluate with BEIR helper (model object is unused for metrics, but API needs one)
         dummy = DRES(models.SentenceBERT("BAAI/bge-base-en-v1.5"), batch_size=16)
